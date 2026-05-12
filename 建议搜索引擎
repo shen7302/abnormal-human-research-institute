@@ -1,0 +1,195 @@
+#include <iostream>
+#include <vector>
+#include <string>
+#include <unordered_map>
+#include <algorithm>
+#include <cctype>
+
+using namespace std;
+
+// 文档数据结构体
+struct Document {
+    int docID;           // 文档唯一编号
+    string content;      // 文档原始文本内容
+};
+
+// 全局核心数据
+vector<Document> allDoc;                          // 全部文档库
+unordered_map<string, vector<int>> invertedIndex; // 倒排索引（搜索引擎核心）
+unordered_map<string, vector<string>> synonymMap; // 同义词/别名映射表
+
+/**
+ * 功能1：文本预处理
+ * 原始文档 → 清洗、标准化、拆分生成可索引词项
+ */
+vector<string> textPreprocess(string rawText) {
+    vector<string> wordList;
+    string singleWord;
+
+    // 遍历字符：过滤符号、英文字母统一转小写
+    for (char ch : rawText) {
+        if (isalpha(ch)) {
+            singleWord += tolower(ch);
+        } else {
+            // 遇到分隔符，保存当前单词
+            if (!singleWord.empty()) {
+                wordList.push_back(singleWord);
+                singleWord.clear();
+            }
+        }
+    }
+    // 保存最后一个剩余单词
+    if (!singleWord.empty()) {
+        wordList.push_back(singleWord);
+    }
+
+    // 同一文档内单词去重，优化索引体积
+    sort(wordList.begin(), wordList.end());
+    auto last = unique(wordList.begin(), wordList.end());
+    wordList.erase(last, wordList.end());
+
+    return wordList;
+}
+
+/**
+ * 功能2：构建倒排索引
+ * 预处理所有文档，建立关键词→所属文档的映射
+ */
+void buildSearchIndex() {
+    invertedIndex.clear();
+    // 遍历所有文档
+    for (const Document& doc : allDoc) {
+        vector<string> words = textPreprocess(doc.content);
+        // 为每个单词绑定文档ID
+        for (const string& word : words) {
+            invertedIndex[word].push_back(doc.docID);
+        }
+    }
+    cout << ">>> 全文索引构建完成！\n" << endl;
+}
+
+/**
+ * 功能3：精准关键词查询
+ */
+vector<Document> exactWordSearch(string keyword) {
+    vector<Document> resultList;
+    // 查询词统一小写
+    transform(keyword.begin(), keyword.end(), keyword.begin(), ::tolower);
+
+    // 索引中无该词，直接返回空
+    if (invertedIndex.find(keyword) == invertedIndex.end()) {
+        return resultList;
+    }
+
+    // 取出所有命中的文档
+    for (int id : invertedIndex[keyword]) {
+        resultList.push_back(allDoc[id]);
+    }
+    return resultList;
+}
+
+/**
+ * 功能4：前缀模糊匹配
+ * 输入部分字符，匹配所有开头相同的词汇
+ * 例：输入"食"，匹配"食堂""食物"等
+ */
+vector<Document> prefixFuzzySearch(string prefix) {
+    vector<Document> resultList;
+    transform(prefix.begin(), prefix.end(), prefix.begin(), ::tolower);
+
+    // 遍历全部索引词，匹配前缀
+    for (auto& indexPair : invertedIndex) {
+        string indexWord = indexPair.first;
+        if (indexWord.size() >= prefix.size() 
+            && indexWord.substr(0, prefix.size()) == prefix) {
+            // 收集命中文档、自动去重
+            for (int docId : indexPair.second) {
+                bool alreadyExist = false;
+                for (const Document& d : resultList) {
+                    if (d.docID == docId) {
+                        alreadyExist = true;
+                        break;
+                    }
+                }
+                if (!alreadyExist) {
+                    resultList.push_back(allDoc[docId]);
+                }
+            }
+        }
+    }
+    return resultList;
+}
+
+/**
+ * 功能5：同义词/别名拓展查询
+ */
+vector<Document> synonymExpandSearch(string keyword) {
+    vector<Document> totalResult;
+    vector<string> searchWords;
+
+    // 先加入原关键词
+    searchWords.push_back(keyword);
+    // 追加所有同义词一起检索
+    if (synonymMap.count(keyword)) {
+        for (const string& s : synonymMap[keyword]) {
+            searchWords.push_back(s);
+        }
+    }
+
+    // 逐个查询合并结果
+    for (const string& word : searchWords) {
+        vector<Document> temp = exactWordSearch(word);
+        totalResult.insert(totalResult.end(), temp.begin(), temp.end());
+    }
+
+    // 最终结果文档去重
+    sort(totalResult.begin(), totalResult.end(), 
+        [](const Document& a, const Document& b) {
+            return a.docID < b.docID;
+        });
+    auto uniqueEnd = unique(totalResult.begin(), totalResult.end(),
+        [](const Document& a, const Document& b) {
+            return a.docID == b.docID;
+        });
+    totalResult.erase(uniqueEnd, totalResult.end());
+
+    return totalResult;
+}
+
+/**
+ * 功能6：搜索关键词高亮
+ * 控制台用红色标记命中关键词
+ */
+string highlightKeyword(string text, string keyword) {
+    size_t pos = 0;
+    string lowerText = text;
+    transform(lowerText.begin(), lowerText.end(), lowerText.begin(), ::tolower);
+    transform(keyword.begin(), keyword.end(), keyword.begin(), ::tolower);
+
+    // 循环高亮所有出现位置
+    while ((pos = lowerText.find(keyword, pos)) != string::npos) {
+        text.insert(pos, "\033[31m");   // 开启红色字体
+        text.insert(pos + keyword.length(), "\033[0m"); // 恢复默认颜色
+        pos += keyword.length() + 9;
+    }
+    return text;
+}
+
+/**
+ * 功能7：摘要截取生成
+ * 截取关键词附近上下文，生成精简预览
+ */
+string generateSummary(string fullText, string keyword, int previewLen = 60) {
+    size_t pos = fullText.find(keyword);
+    // 未找到关键词，从头截取
+    if (pos == string::npos) pos = 0;
+    // 关键词前后预留上下文
+    int startIdx = max(0, (int)pos - 20);
+    return "..." + fullText.substr(startIdx, previewLen) + "...";
+}
+
+// 初始化测试文档与同义词库
+void initSystemData() {
+    // 导入测试文档（可自行增删改成你的校园导航文本）
+    allDoc = {
+        {0, "我在食堂很想你，今天食堂的饭菜味
