@@ -1,0 +1,232 @@
+#include <stdio.h>
+#include <string.h>
+
+#define MAX_HISTORY 100
+#define HISTORY_FILE "search_history.txt"
+
+// 历史记录存储
+char history[MAX_HISTORY][256];
+int history_count = 0;
+
+// 加载历史记录
+void load_history() {
+    FILE *fp = fopen(HISTORY_FILE, "r");
+    if (!fp) return;
+
+    history_count = 0;
+    while (fgets(history[history_count], 256, fp) && history_count < MAX_HISTORY) {
+        // 去掉换行符
+        history[history_count][strcspn(history[history_count], "\n")] = '\0';
+        history_count++;
+    }
+    fclose(fp);
+}
+
+// 保存一条搜索记录
+void save_history(const char *keyword) {
+    if (history_count >= MAX_HISTORY) return;
+
+    // 内存保存
+    strcpy(history[history_count], keyword);
+    history_count++;
+
+    // 文件追加保存
+    FILE *fp = fopen(HISTORY_FILE, "a");
+    if (fp) {
+        fprintf(fp, "%s\n", keyword);
+        fclose(fp);
+    }
+}
+
+// 显示所有历史
+void show_history() {
+    printf("\n===== 搜索历史 =====\n");
+    if (history_count == 0) {
+        printf("无历史记录\n");
+        return;
+    }
+    for (int i = 0; i < history_count; i++) {
+        printf("%d. %s\n", i + 1, history[i]);
+    }
+}
+
+// 清空历史
+void clear_history() {
+    history_count = 0;
+    FILE *fp = fopen(HISTORY_FILE, "w");
+    if (fp) fclose(fp);
+    printf("历史已清空\n");
+}
+
+// 测试主函数
+int main() {
+    load_history();
+
+    save_history("C语言 搜索引擎");
+    save_history("表达式解析");
+    save_history("搜索历史");
+
+    show_history();
+    // clear_history();
+    return 0;
+}
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <ctype.h>
+
+#define MAX_WORDS 100
+#define MAX_DOCS 10
+
+// 倒排索引结构
+typedef struct {
+    char word[50];
+    int docs[MAX_DOCS];
+    int count;
+} InvertedIndex;
+
+InvertedIndex index[MAX_WORDS];
+int index_count = 0;
+
+// 示例文档（你可以替换成自己的文本库）
+const char *documents[] = {
+    "C语言实现搜索引擎",
+    "搜索历史记录功能",
+    "表达式查询解析模块",
+    "C语言 OR 搜索引擎 开发",
+    "历史记录 AND 查询系统"
+};
+int doc_count = 5;
+
+// 建立倒排索引
+void build_index() {
+    for (int d = 0; d < doc_count; d++) {
+        char temp[256];
+        strcpy(temp, documents[d]);
+
+        char *word = strtok(temp, " ,。");
+        while (word != NULL) {
+            // 转小写
+            for (int i = 0; word[i]; i++) word[i] = tolower(word[i]);
+
+            // 查找是否已存在
+            int i;
+            for (i = 0; i < index_count; i++) {
+                if (strcmp(index[i].word, word) == 0) break;
+            }
+
+            // 不存在则新增
+            if (i == index_count) {
+                strcpy(index[i].word, word);
+                index[i].count = 0;
+                index_count++;
+            }
+
+            // 加入文档编号
+            index[i].docs[index[i].count++] = d;
+            word = strtok(NULL, " ,。");
+        }
+    }
+}
+
+// 获取某个词的匹配文档
+void get_word_docs(const char *word, int *out, int *out_cnt) {
+    char lower[50];
+    strcpy(lower, word);
+    for (int i = 0; lower[i]; i++) lower[i] = tolower(lower[i]);
+
+    *out_cnt = 0;
+    for (int i = 0; i < index_count; i++) {
+        if (strcmp(index[i].word, lower) == 0) {
+            memcpy(out, index[i].docs, index[i].count * sizeof(int));
+            *out_cnt = index[i].count;
+            return;
+        }
+    }
+}
+
+// AND 运算：取交集
+void and(int *a, int a_cnt, int *b, int b_cnt, int *res, int *res_cnt) {
+    *res_cnt = 0;
+    for (int i = 0; i < a_cnt; i++) {
+        for (int j = 0; j < b_cnt; j++) {
+            if (a[i] == b[j]) res[(*res_cnt)++] = a[i];
+        }
+    }
+}
+
+// OR 运算：取并集
+void or(int *a, int a_cnt, int *b, int b_cnt, int *res, int *res_cnt) {
+    memcpy(res, a, a_cnt * sizeof(int));
+    *res_cnt = a_cnt;
+
+    for (int j = 0; j < b_cnt; j++) {
+        int exist = 0;
+        for (int i = 0; i < a_cnt; i++) {
+            if (a[i] == b[j]) { exist = 1; break; }
+        }
+        if (!exist) res[(*res_cnt)++] = b[j];
+    }
+}
+
+// NOT 运算
+void not(int *target, int t_cnt, int *res, int *res_cnt) {
+    *res_cnt = 0;
+    for (int d = 0; d < doc_count; d++) {
+        int find = 0;
+        for (int i = 0; i < t_cnt; i++) {
+            if (d == target[i]) { find = 1; break; }
+        }
+        if (!find) res[(*res_cnt)++] = d;
+    }
+}
+
+// 解析表达式：支持 AND / OR / NOT
+void parse_query(const char *query) {
+    char q[256];
+    strcpy(q, query);
+
+    int result[MAX_DOCS], r_cnt = 0;
+    char *token = strtok(q, " ");
+
+    while (token) {
+        if (strcmp(token, "AND") == 0) {
+            token = strtok(NULL, " ");
+            int b[MAX_DOCS], b_cnt;
+            get_word_docs(token, b, &b_cnt);
+            and(result, r_cnt, b, b_cnt, result, &r_cnt);
+        }
+        else if (strcmp(token, "OR") == 0) {
+            token = strtok(NULL, " ");
+            int b[MAX_DOCS], b_cnt;
+            get_word_docs(token, b, &b_cnt);
+            or(result, r_cnt, b, b_cnt, result, &r_cnt);
+        }
+        else if (strcmp(token, "NOT") == 0) {
+            token = strtok(NULL, " ");
+            int b[MAX_DOCS], b_cnt;
+            get_word_docs(token, b, &b_cnt);
+            not(b, b_cnt, result, &r_cnt);
+        }
+        else {
+            get_word_docs(token, result, &r_cnt);
+        }
+        token = strtok(NULL, " ");
+    }
+
+    // 输出结果
+    printf("\n查询结果：\n");
+    for (int i = 0; i < r_cnt; i++) {
+        printf("[%d] %s\n", result[i], documents[result[i]]);
+    }
+}
+
+// 测试
+int main() {
+    build_index();
+
+    // 测试查询
+    parse_query("C语言 OR 历史");
+    // parse_query("搜索 AND 历史");
+    return 0;
+}
