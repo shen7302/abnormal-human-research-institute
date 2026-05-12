@@ -1,0 +1,218 @@
+#include <iostream>
+#include <vector>
+#include <string>
+#include <unordered_map>
+#include <algorithm>
+#include <cctype>
+
+using namespace std;
+
+// 文档结构体
+struct Doc {
+    int id;
+    string content;
+};
+
+// 全局核心数据
+vector<Doc> docs;
+unordered_map<string, vector<int>> invertIndex;
+// 同义词/别名库（表格要求功能）
+unordered_map<string, vector<string>> synonymDict;
+
+// ===================== 1. 文本预处理（表格指定要求） =====================
+// 把原始文档清洗、拆分、转为可建立索引的标准词项
+vector<string> preprocessText(string rawStr) {
+    vector<string> words;
+    string tempWord;
+
+    for (char c : rawStr) {
+        // 字母统一转小写，过滤标点空格
+        if (isalpha(c)) {
+            tempWord += tolower(c);
+        } else {
+            if (!tempWord.empty()) {
+                words.push_back(tempWord);
+                tempWord.clear();
+            }
+        }
+    }
+    if (!tempWord.empty()) words.push_back(tempWord);
+
+    // 单文档内词项去重，优化索引
+    sort(words.begin(), words.end());
+    auto last = unique(words.begin(), words.end());
+    words.erase(last, words.end());
+
+    return words;
+}
+
+// ===================== 2. 构建倒排索引 =====================
+void buildIndex() {
+    invertIndex.clear();
+    for (const Doc& d : docs) {
+        vector<string> terms = preprocessText(d.content);
+        for (string& term : terms) {
+            invertIndex[term].push_back(d.id);
+        }
+    }
+    cout << "✅ 全文索引构建完成\n" << endl;
+}
+
+// ===================== 3. 基础精准查询 =====================
+vector<Doc> exactSearch(string keyword) {
+    vector<Doc> res;
+    transform(keyword.begin(), keyword.end(), keyword.begin(), ::tolower);
+
+    if (!invertIndex.count(keyword)) return res;
+
+    for (int docId : invertIndex[keyword]) {
+        res.push_back(docs[docId]);
+    }
+    return res;
+}
+
+// ===================== 4. 模糊/前缀匹配（表格指定核心功能） =====================
+// 例子：输入"食"，匹配"食堂、食物、食堂楼"等
+vector<Doc> prefixFuzzySearch(string prefix) {
+    vector<Doc> res;
+    transform(prefix.begin(), prefix.end(), prefix.begin(), ::tolower);
+
+    for (auto& item : invertIndex) {
+        string word = item.first;
+        // 前缀匹配判定
+        if (word.size() >= prefix.size() 
+            && word.substr(0, prefix.size()) == prefix) {
+            // 去重加入结果
+            for (int id : item.second) {
+                bool exist = false;
+                for (auto& r : res) {
+                    if (r.id == id) { exist = true; break; }
+                }
+                if (!exist) res.push_back(docs[id]);
+            }
+        }
+    }
+    return res;
+}
+
+// ===================== 5. 同义词/别名管理（表格指定功能） =====================
+vector<Doc> synonymSearch(string word) {
+    vector<Doc> totalRes;
+    vector<string> searchList;
+    searchList.push_back(word);
+
+    // 追加所有同义词、别名一起检索
+    if (synonymDict.find(word) != synonymDict.end()) {
+        for (auto& s : synonymDict[word]) {
+            searchList.push_back(s);
+        }
+    }
+
+    // 合并所有查询结果
+    for (auto& w : searchList) {
+        auto tmp = exactSearch(w);
+        totalRes.insert(totalRes.end(), tmp.begin(), tmp.end());
+    }
+
+    // 结果文档去重
+    sort(totalRes.begin(), totalRes.end(), [](const Doc& a, const Doc& b){
+        return a.id < b.id;
+    });
+    auto uniqueEnd = unique(totalRes.begin(), totalRes.end(), [](const Doc& a, const Doc& b){
+        return a.id == b.id;
+    });
+    totalRes.erase(uniqueEnd, totalRes.end());
+
+    return totalRes;
+}
+
+// ===================== 6. 结果高亮定位（表格指定） =====================
+string highlightKeyword(string text, string key) {
+    size_t pos = 0;
+    string lowText = text;
+    transform(lowText.begin(), lowText.end(), lowText.begin(), ::tolower);
+    transform(key.begin(), key.end(), key.begin(), ::tolower);
+
+    // 给所有命中关键词加红色高亮
+    while ((pos = lowText.find(key, pos)) != string::npos) {
+        text.insert(pos, "\033[31m");
+        text.insert(pos + key.size(), "\033[0m");
+        pos += key.size() + 9;
+    }
+    return text;
+}
+
+// ===================== 7. 摘要生成（表格指定） =====================
+string generateAbstract(string fullText, string key) {
+    // 定位关键词位置，截取前后上下文生成精简摘要
+    size_t pos = fullText.find(key);
+    if (pos == string::npos) pos = 0;
+    int start = max(0, (int)pos - 15);
+    return "..." + fullText.substr(start, 70) + "...";
+}
+
+// 初始化测试数据&同义词库
+void initData() {
+    // 示例文档（对应表格示例句子）
+    docs = {
+        {0, "我在食堂很想你，校园东区食堂味道很好"},
+        {1, "百米终点见，操场的跑道已经翻新完毕"},
+        {2, "图书馆是校园自习的最佳地点"},
+        {3, "餐厅也叫食堂，是校园就餐的主要场所"},
+        {4, "运动场也就是操场，傍晚很多同学运动"}
+    };
+
+    // 同义词/别名配置
+    synonymDict = {
+        {"食堂", {"餐厅", "饭堂"}},
+        {"操场", {"运动场", "田径场"}}
+    };
+}
+
+// 主交互界面
+int main() {
+    // 初始化
+    initData();
+    buildIndex();
+
+    int mode;
+    string query;
+    vector<Doc> result;
+
+    cout << "========= 简易搜索引擎 课程实践 =========" << endl;
+    cout << "1. 精准关键词查询" << endl;
+    cout << "2. 前缀模糊匹配查询" << endl;
+    cout << "3. 同义词别名智能查询" << endl;
+    cout << "请选择查询模式(1/2/3): ";
+    cin >> mode;
+    cin.ignore();
+
+    cout << "请输入搜索关键词: ";
+    getline(cin, query);
+
+    // 选择对应查询算法
+    switch(mode) {
+        case 1: result = exactSearch(query); break;
+        case 2: result = prefixFuzzySearch(query); break;
+        case 3: result = synonymSearch(query); break;
+        default: result = exactSearch(query);
+    }
+
+    // 结果展示
+    cout << "\n========================================" << endl;
+    cout << "一共找到 " << result.size() << " 条相关结果" << endl;
+    cout << "========================================" << endl;
+
+    if (result.empty()) {
+        cout << "未查询到相关内容" << endl;
+    } else {
+        for (auto& item : result) {
+            string abs = generateAbstract(item.content, query);
+            string outText = highlightKeyword(abs, query);
+            cout << "\n文档" << item.id << "：" << outText << endl;
+        }
+    }
+
+    cout << "\n程序运行结束" << endl;
+    return 0;
+}
