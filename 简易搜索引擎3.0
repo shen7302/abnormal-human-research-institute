@@ -1,0 +1,679 @@
+#include <iostream>
+#include <vector>
+#include <string>
+#include <unordered_map>
+#include <algorithm>
+#include <cctype>
+#include <fstream>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
+using namespace std;
+
+// 文档结构体：存储单篇文档编号、标题、正文、分词结果
+struct Document {
+    int id;                 // 文档唯一编号
+    string title;           // 文档标题
+    string content;         // 文档正文内容
+    vector<string> words;   // 文档分词后的单词数组
+};
+
+vector<Document> docs;                          // 全局文档库，存放所有文档
+unordered_map<string, vector<int>> invertIndex; // 倒排索引：关键词→包含该词的文档id列表
+unordered_map<string, vector<string>> synonymDict; // 同义词字典：关键词→同义词集合
+
+vector<string> searchHistory;                  // 内存保存的搜索历史
+const string HISTORY_FILE = "search_history.txt";// 搜索历史本地存储文件名
+
+// 单链表节点结构体，用于独立的链表功能模块
+struct LinkNode {
+    int data;               // 节点存储整型数据
+    LinkNode* next;        // 后继节点指针
+};
+
+// 字符串全部转为小写字母，统一检索格式
+void toLower(string& s) {
+    for (char& c : s) {
+        c = tolower((unsigned char)c);
+    }
+}
+
+// 判断字符是否为分隔符（非英文字母即为分隔符号：标点、空格、数字等）
+bool isSep(char c) {
+    return !isalpha((unsigned char)c);
+}
+
+// 对传入文档正文执行分词，结果存入doc.words
+void tokenize(Document& doc) {
+    doc.words.clear();
+    string buf = doc.content;
+    int p = 0;
+    int len = buf.length();
+    // 逐个字符遍历截取单词
+    while (p < len) {
+        // 跳过分隔符
+        while (p < len && isSep(buf[p])) p++;
+        if (p >= len) break;
+        int start = p;
+        // 截取连续字母作为一个单词
+        while (p < len && !isSep(buf[p])) p++;
+        string word = buf.substr(start, p - start);
+        toLower(word);
+        doc.words.push_back(word);
+    }
+}
+
+// 添加新文档，自动分词、更新文档库并重建索引
+void addDoc() {
+    Document d;
+    d.id = docs.size(); // id等于当前文档总数，自增编号
+    cout << "请输入文档标题：";
+    cin.ignore();
+    getline(cin, d.title);
+    cout << "请输入文档内容：\n";
+    getline(cin, d.content);
+    tokenize(d);        // 新文档自动分词
+    docs.push_back(d);
+    cout << "文档添加成功，共" << docs.size() << "个文档。\n";
+}
+
+// 遍历输出全部文档标题与序号
+void listDocs() {
+    if (docs.empty()) {
+        cout << "当前文档库为空。\n";
+        return;
+    }
+    cout << "=== 文档列表（共" << docs.size() << "个） ===\n";
+    for (size_t i = 0; i < docs.size(); i++) {
+        cout << "[" << i + 1 << "] " << docs[i].title << "\n";
+    }
+}
+
+// 根据编号查看文档详情：标题、全文、分词列表
+void viewDoc() {
+    if (docs.empty()) {
+        cout << "当前无文档可查看。\n";
+        return;
+    }
+    int idx;
+    cout << "请输入要查看的文档编号：";
+    if (!(cin >> idx) || idx < 1 || idx > (int)docs.size()) {
+        cout << "无效编号。\n";
+        cin.clear();
+        cin.ignore(10000, '\n');
+        return;
+    }
+    Document& d = docs[idx - 1];
+    cout << "\n=== 文档标题：" << d.title << " ===\n";
+    cout << "内容：\n" << d.content << "\n";
+    cout << "分词列表（共" << d.words.size() << "个词）：\n";
+    // 每行10个分词输出
+    for (size_t i = 0; i < d.words.size(); i++) {
+        cout << d.words[i] << " ";
+        if ((i + 1) % 10 == 0) cout << "\n";
+    }
+    cout << "\n";
+}
+
+// 按编号删除文档，删除后修正剩余文档id
+void deleteDoc() {
+    if (docs.empty()) {
+        cout << "当前无文档可删除。\n";
+        return;
+    }
+    int idx;
+    cout << "请输入要删除的文档编号：";
+    if (!(cin >> idx) || idx < 1 || idx > (int)docs.size()) {
+        cout << "无效编号。\n";
+        cin.clear();
+        cin.ignore(10000, '\n');
+        return;
+    }
+    docs.erase(docs.begin() + idx - 1);
+    // 删除后重新修正所有文档id，保证id连续
+    for (size_t i = 0; i < docs.size(); i++) {
+        docs[i].id = i;
+    }
+    cout << "删除成功，当前剩余" << docs.size() << "个文档。\n";
+}
+
+// 文本预处理：分词、小写、去重，用于构建倒排索引
+vector<string> preprocessText(string rawStr) {
+    vector<string> words;
+    string tempWord;
+    for (char c : rawStr) {
+        if (isalpha((unsigned char)c)) {
+            tempWord += tolower((unsigned char)c);
+        } else {
+            if (!tempWord.empty()) {
+                words.push_back(tempWord);
+                tempWord.clear();
+            }
+        }
+    }
+    if (!tempWord.empty()) words.push_back(tempWord);
+    // 排序+去重，一个文档同一个关键词只存一次id
+    sort(words.begin(), words.end());
+    auto last = unique(words.begin(), words.end());
+    words.erase(last, words.end());
+    return words;
+}
+
+// 全量构建倒排索引：遍历所有文档，关键词映射文档id
+void buildIndex() {
+    invertIndex.clear();
+    for (const Document& d : docs) {
+        // 标题+正文共同参与索引构建
+        vector<string> terms = preprocessText(d.content + " " + d.title);
+        for (string& term : terms) {
+            invertIndex[term].push_back(d.id);
+        }
+    }
+    cout << "全文索引构建完成\n";
+}
+
+// 精准搜索：完全匹配关键词，返回对应文档集合
+vector<Document> exactSearch(string keyword) {
+    vector<Document> res;
+    toLower(keyword);
+    if (!invertIndex.count(keyword)) return res;
+    // 根据id查找原文档存入结果集
+    for (int docId : invertIndex[keyword]) {
+        for(const auto& d : docs) {
+            if(d.id == docId) {
+                res.push_back(d);
+                break;
+            }
+        }
+    }
+    return res;
+}
+
+// 前缀模糊搜索：匹配所有以prefix开头的关键词
+vector<Document> prefixFuzzySearch(string prefix) {
+    vector<Document> res;
+    toLower(prefix);
+    // 遍历倒排索引所有关键词，匹配前缀
+    for (auto& item : invertIndex) {
+        string word = item.first;
+        if (word.size() >= prefix.size() && word.substr(0, prefix.size()) == prefix) {
+            for (int id : item.second) {
+                // 去重：同一文档只加入一次
+                bool exist = false;
+                for (auto& r : res) {
+                    if (r.id == id) { exist = true; break; }
+                }
+                if (!exist) {
+                    for(const auto& d : docs) {
+                        if(d.id == id) {
+                            res.push_back(d);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return res;
+}
+
+// 同义词检索：原词+所有同义词一并检索结果
+vector<Document> synonymSearch(string word) {
+    vector<Document> totalRes;
+    vector<string> searchList;
+    toLower(word);
+    searchList.push_back(word);
+    // 读取同义词加入检索列表
+    if (synonymDict.find(word) != synonymDict.end()) {
+        for (auto& s : synonymDict[word]) {
+            searchList.push_back(s);
+        }
+    }
+    // 逐个关键词查询，合并结果
+    for (auto& w : searchList) {
+        auto tmp = exactSearch(w);
+        totalRes.insert(totalRes.end(), tmp.begin(), tmp.end());
+    }
+    // 结果按id排序并去重
+    sort(totalRes.begin(), totalRes.end(), [](const Document& a, const Document& b){
+        return a.id < b.id;
+    });
+    auto uniqueEnd = unique(totalRes.begin(), totalRes.end(), [](const Document& a, const Document& b){
+        return a.id == b.id;
+    });
+    totalRes.erase(uniqueEnd, totalRes.end());
+    return totalRes;
+}
+
+// 检索关键词标红：ANSI控制台红字高亮关键字
+string highlightKeyword(string text, string key) {
+    size_t pos = 0;
+    string lowText = text;
+    toLower(lowText);
+    toLower(key);
+    // 循环查找关键字并插入颜色标记
+    while ((pos = lowText.find(key, pos)) != string::npos) {
+        text.insert(pos, "\033[31m");
+        text.insert(pos + key.size() + 5, "\033[0m");
+        pos += key.size() + 9;
+        lowText = text;
+        toLower(lowText);
+    }
+    return text;
+}
+
+// 生成文档摘要：关键词前后截取70字符片段
+string generateAbstract(string fullText, string key) {
+    size_t pos = fullText.find(key);
+    if (pos == string::npos) pos = 0;
+    int start = max(0, (int)pos - 15);
+    int len = min((int)fullText.size() - start, 70);
+    return "..." + fullText.substr(start, len) + "...";
+}
+
+// 根据单词从倒排索引取出对应文档id列表
+void getWordDocs(const string& word, vector<int>& out) {
+    out.clear();
+    string lower = word;
+    toLower(lower);
+    if (invertIndex.count(lower)) {
+        out = invertIndex[lower];
+    }
+}
+
+// AND逻辑：取两个id集合交集
+void queryAnd(const vector<int>& a, const vector<int>& b, vector<int>& res) {
+    res.clear();
+    for (int x : a) {
+        for (int y : b) {
+            if (x == y) {
+                res.push_back(x);
+                break;
+            }
+        }
+    }
+}
+
+// OR逻辑：取两个id集合并集
+void queryOr(const vector<int>& a, const vector<int>& b, vector<int>& res) {
+    res = a;
+    for (int y : b) {
+        bool exist = false;
+        for (int x : a) {
+            if (x == y) { exist = true; break; }
+        }
+        if (!exist) res.push_back(y);
+    }
+}
+
+// NOT逻辑：全集减去目标集合，得到剩余文档id
+void queryNot(const vector<int>& target, vector<int>& res) {
+    res.clear();
+    for (int d = 0; d < (int)docs.size(); d++) {
+        bool find = false;
+        for (int x : target) {
+            if (d == x) { find = true; break; }
+        }
+        if (!find) res.push_back(docs[d].id);
+    }
+}
+
+// 解析布尔查询语句（AND/OR/NOT），完成复合检索
+void parseQuery(const string& query) {
+    string q = query;
+    vector<int> result;
+    vector<string> tokens;
+    string temp = "";
+    // 空格分割语句为关键词与运算符
+    for (char c : q) {
+        if (c == ' ') {
+            if (!temp.empty()) {
+                tokens.push_back(temp);
+                temp.clear();
+            }
+        } else {
+            temp += c;
+        }
+    }
+    if (!temp.empty()) tokens.push_back(temp);
+
+    bool first = true;
+    // 遍历分词后的查询单元，识别逻辑运算符
+    for (size_t i = 0; i < tokens.size(); i++) {
+        if (tokens[i] == "AND" && i + 1 < tokens.size()) {
+            vector<int> b;
+            getWordDocs(tokens[++i], b);
+            queryAnd(result, b, result);
+        } else if (tokens[i] == "OR" && i + 1 < tokens.size()) {
+            vector<int> b;
+            getWordDocs(tokens[++i], b);
+            queryOr(result, b, result);
+        } else if (tokens[i] == "NOT" && i + 1 < tokens.size()) {
+            vector<int> b;
+            getWordDocs(tokens[++i], b);
+            queryNot(b, result);
+        } else {
+            vector<int> b;
+            getWordDocs(tokens[i], b);
+            if (first) {
+                result = b;
+                first = false;
+            } else {
+                queryAnd(result, b, result);
+            }
+        }
+    }
+
+    cout << "\n查询结果：\n";
+    if (result.empty()) {
+        cout << "未查询到相关内容\n";
+    } else {
+        for (int id : result) {
+            for(const auto& d : docs) {
+                if(d.id == id) {
+                    cout << "[" << d.id << "] " << d.title << " - " << d.content << "\n";
+                    break;
+                }
+            }
+        }
+    }
+}
+
+// 程序启动从本地文件读取历史搜索记录
+void loadHistory() {
+    ifstream fp(HISTORY_FILE);
+    if (!fp) return;
+    searchHistory.clear();
+    string line;
+    while (getline(fp, line)) {
+        if (!line.empty()) {
+            searchHistory.push_back(line);
+        }
+    }
+    fp.close();
+}
+
+// 每次搜索后追加保存本次关键词到本地文件与内存
+void saveHistory(const string& keyword) {
+    searchHistory.push_back(keyword);
+    ofstream fp(HISTORY_FILE, ios::app);
+    if (fp) {
+        fp << keyword << "\n";
+        fp.close();
+    }
+}
+
+// 打印全部搜索历史
+void showHistory() {
+    cout << "\n===== 搜索历史 =====\n";
+    if (searchHistory.empty()) {
+        cout << "无历史记录\n";
+        return;
+    }
+    for (size_t i = 0; i < searchHistory.size(); i++) {
+        cout << i + 1 << ". " << searchHistory[i] << "\n";
+    }
+}
+
+// 清空内存历史+清空本地历史文件
+void clearHistory() {
+    searchHistory.clear();
+    ofstream fp(HISTORY_FILE, ios::trunc);
+    if (fp) fp.close();
+    cout << "历史已清空\n";
+}
+
+// 初始化带头结点空链表
+void initList(LinkNode*& L) {
+    L = new LinkNode;
+    L->next = nullptr;
+}
+
+// 销毁整条链表，释放堆内存
+void destroyList(LinkNode* L) {
+    LinkNode* p = L->next;
+    while (p != nullptr) {
+        LinkNode* q = p->next;
+        delete p;
+        p = q;
+    }
+    L->next = nullptr;
+}
+
+// 尾插法新建链表
+void createList(LinkNode* L) {
+    destroyList(L);
+    int n;
+    cout << "请输入链表元素个数：";
+    if (!(cin >> n) || n <= 0) {
+        cout << "输入有误!元素个数必须大于0。\n";
+        cin.clear();
+        cin.ignore(10000, '\n');
+        return;
+    }
+    LinkNode* tail = L;
+    cout << "请输入" << n << "个整数（用空格分隔）：";
+    for (int i = 0; i < n; i++) {
+        int val;
+        cin >> val;
+        LinkNode* newNode = new LinkNode;
+        newNode->data = val;
+        newNode->next = nullptr;
+        tail->next = newNode;
+        tail = newNode;
+    }
+    cout << "链表创建完成!\n";
+}
+
+// 链表按值顺序查找，输出下标
+void linkSearch(LinkNode* L, int target) {
+    LinkNode* p = L->next;
+    int pos = 1;
+    while (p != nullptr) {
+        if (p->data == target) {
+            cout << "查找成功!目标值" << target << "是链表的第" << pos << "个节点。\n";
+            return;
+        }
+        p = p->next;
+        pos++;
+    }
+    cout << "查找失败!目标值" << target << "不在链表中。\n";
+}
+
+// 遍历打印链表所有元素
+void printList(LinkNode* L) {
+    if (L->next == nullptr) {
+        cout << "当前链表为空，请先创建链表!\n";
+        return;
+    }
+    LinkNode* p = L->next;
+    cout << "当前链表元素为：";
+    while (p != nullptr) {
+        cout << p->data << " ";
+        p = p->next;
+    }
+    cout << "\n";
+}
+
+// 初始化预置测试文档与同义词库
+void initData() {
+    docs = {
+        {0, "食堂通知", "我在食堂很想你，校园东区食堂味道很好"},
+        {1, "操场翻新", "百米终点见，操场的跑道已经翻新完毕"},
+        {2, "图书馆", "图书馆是校园自习的最佳地点"},
+        {3, "餐厅介绍", "餐厅也叫食堂，是校园就餐的主要场所"},
+        {4, "运动场", "运动场也就是操场，傍晚很多同学运动"}
+    };
+
+    synonymDict = {
+        {"食堂", {"餐厅", "饭堂"}},
+        {"操场", {"运动场", "田径场"}}
+    };
+}
+
+int main() {
+    initData();                 // 加载初始测试数据
+    buildIndex();               // 初始构建倒排索引
+    loadHistory();              // 载入历史记录
+
+    LinkNode* linkList = nullptr;
+    initList(linkList);         // 创建链表头结点
+
+    int mainOp;
+    // 系统主循环菜单
+    while (true) {
+        cout << "\n===== 综合文本检索与管理系统 =====\n";
+        cout << "1. 文档管理\n";
+        cout << "2. 智能搜索\n";
+        cout << "3. 搜索历史\n";
+        cout << "4. 链表操作\n";
+        cout << "0. 退出系统\n";
+        cout << "请输入主菜单选项：";
+        
+        if (!(cin >> mainOp)) {
+            cin.clear();
+            cin.ignore(10000, '\n');
+            cout << "无效输入，请重新选择。\n";
+            continue;
+        }
+
+        if (mainOp == 0) {
+            cout << "系统退出。\n";
+            destroyList(linkList);
+            delete linkList;
+            break;
+        }
+
+        // 模块1：文档管理子菜单
+        if (mainOp == 1) {
+            int subOp;
+            while (true) {
+                cout << "\n--- 文档管理 ---\n";
+                cout << "1. 添加文档\n";
+                cout << "2. 列出文档\n";
+                cout << "3. 查看文档\n";
+                cout << "4. 删除文档\n";
+                cout << "0. 返回主菜单\n";
+                cout << "请选择：";
+                if (!(cin >> subOp)) {
+                    cin.clear();
+                    cin.ignore(10000, '\n');
+                    continue;
+                }
+                if (subOp == 0) break;
+                switch (subOp) {
+                    case 1: addDoc(); buildIndex(); break;
+                    case 2: listDocs(); break;
+                    case 3: viewDoc(); break;
+                    case 4: deleteDoc(); buildIndex(); break;
+                    default: cout << "无效选项。\n";
+                }
+            }
+        } 
+        // 模块2：四种搜索功能
+        else if (mainOp == 2) {
+            int mode;
+            string query;
+            vector<Document> result;
+
+            cout << "\n--- 智能搜索 ---\n";
+            cout << "1. 精准关键词查询\n";
+            cout << "2. 前缀模糊匹配查询\n";
+            cout << "3. 同义词别名智能查询\n";
+            cout << "4. 布尔表达式查询 (AND/OR/NOT)\n";
+            cout << "请选择查询模式：";
+            if (!(cin >> mode)) {
+                cin.clear();
+                cin.ignore(10000, '\n');
+                continue;
+            }
+            cin.ignore();
+            cout << "请输入搜索关键词/表达式: ";
+            getline(cin, query);
+
+            saveHistory(query); // 保存本次搜索记录
+
+            if (mode == 4) {
+                parseQuery(query);
+            } else {
+                switch(mode) {
+                    case 1: result = exactSearch(query); break;
+                    case 2: result = prefixFuzzySearch(query); break;
+                    case 3: result = synonymSearch(query); break;
+                    default: result = exactSearch(query);
+                }
+
+                cout << "\n一共找到 " << result.size() << " 条相关结果\n";
+                if (result.empty()) {
+                    cout << "未查询到相关内容\n";
+                } else {
+                    for (auto& item : result) {
+                        string abs = generateAbstract(item.content, query);
+                        string outText = highlightKeyword(abs, query);
+                        cout << "\n文档" << item.id << "：" << item.title << "\n" << outText << "\n";
+                    }
+                }
+            }
+        } 
+        // 模块3：搜索历史管理
+        else if (mainOp == 3) {
+            int subOp;
+            while (true) {
+                cout << "\n--- 搜索历史 ---\n";
+                cout << "1. 查看历史\n";
+                cout << "2. 清空历史\n";
+                cout << "0. 返回主菜单\n";
+                cout << "请选择：";
+                if (!(cin >> subOp)) {
+                    cin.clear();
+                    cin.ignore(10000, '\n');
+                    continue;
+                }
+                if (subOp == 0) break;
+                switch (subOp) {
+                    case 1: showHistory(); break;
+                    case 2: clearHistory(); break;
+                    default: cout << "无效选项。\n";
+                }
+            }
+        } 
+        // 模块4：单链表操作
+        else if (mainOp == 4) {
+            int subOp;
+            int target;
+            while (true) {
+                cout << "\n--- 链表操作 ---\n";
+                cout << "1. 创建新链表\n";
+                cout << "2. 按值查找元素\n";
+                cout << "3. 打印当前链表\n";
+                cout << "0. 返回主菜单\n";
+                cout << "请选择：";
+                if (!(cin >> subOp)) {
+                    cin.clear();
+                    cin.ignore(10000, '\n');
+                    continue;
+                }
+                if (subOp == 0) break;
+                switch (subOp) {
+                    case 1: createList(linkList); break;
+                    case 2:
+                        if (linkList->next == nullptr) {
+                            cout << "当前链表为空，请先创建链表!\n";
+                            break;
+                        }
+                        cout << "请输入要查找的整数：";
+                        cin >> target;
+                        linkSearch(linkList, target);
+                        break;
+                    case 3: printList(linkList); break;
+                    default: cout << "无效选项。\n";
+                }
+            }
+        } 
+        else {
+            cout << "无效主菜单选项。\n";
+        }
+    }
+    return 0;
+}
