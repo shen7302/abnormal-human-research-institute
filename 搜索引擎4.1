@@ -2,290 +2,346 @@
 #include <vector>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <algorithm>
 #include <cctype>
 #include <fstream>
-#include <memory>
-
 using namespace std;
 
-// ===================== Trie 前缀树 (智能指针管理内存) =====================
+// ===================== 二叉搜索树版 Trie =====================
 struct TrieNode {
-    unordered_map<char, unique_ptr<TrieNode>> children;
-    bool isEnd = false;
+    char ch;  TrieNode *left, *right, *child;  bool isEnd;
+    TrieNode(char c) : ch(c), left(nullptr), right(nullptr), child(nullptr), isEnd(false) {}
 };
 
 class Trie {
-private:
-    unique_ptr<TrieNode> root;
-    void collect(TrieNode* node, const string& cur, vector<string>& res) {
-        if (node->isEnd) res.push_back(cur);
-        for (auto& p : node->children) collect(p.second.get(), cur + p.first, res);
+    TrieNode* root = nullptr;
+    TrieNode* insertChar(TrieNode*& n, char c) {
+        if (!n) return n = new TrieNode(c);
+        if (c < n->ch) return insertChar(n->left, c);
+        if (c > n->ch) return insertChar(n->right, c);
+        return n;
+    }
+    TrieNode* findChar(TrieNode* n, char c) {
+        if (!n) return nullptr;
+        if (c == n->ch) return n;
+        return findChar(c < n->ch ? n->left : n->right, c);
+    }
+    void destroy(TrieNode* n) {
+        if (!n) return;
+        destroy(n->left); destroy(n->right); destroy(n->child); delete n;
+    }
+    void collect(TrieNode* n, string pre, vector<string>& res) {
+        if (!n) return;
+        string cur = pre + n->ch;
+        if (n->isEnd) res.push_back(cur);
+        collect(n->left, pre, res); collect(n->right, pre, res); collect(n->child, cur, res);
     }
 public:
-    Trie() : root(make_unique<TrieNode>()) {}
+    ~Trie() { destroy(root); }
+    void clear() { destroy(root); root = nullptr; }
     void insert(const string& word) {
-        TrieNode* cur = root.get();
-        for (char c : word) {
-            if (!cur->children.count(c)) cur->children[c] = make_unique<TrieNode>();
-            cur = cur->children[c].get();
-        }
-        cur->isEnd = true;
+        TrieNode* cur = root; TrieNode** p = &root;
+        for (char c : word) { cur = insertChar(*p, c); p = &(cur->child); }
+        if (cur) cur->isEnd = true;
     }
-    vector<string> startWith(const string& prefix) {
-        vector<string> res;
-        TrieNode* cur = root.get();
-        for (char c : prefix) {
-            if (!cur->children.count(c)) return res;
-            cur = cur->children[c].get();
+    vector<string> startWith(const string& pre) {
+        vector<string> res; TrieNode* cur = root;
+        for (size_t i = 0; i < pre.size(); i++) {
+            if (!(cur = findChar(cur, pre[i]))) return res;
+            if (i != pre.size() - 1) cur = cur->child;
         }
-        collect(cur, prefix, res);
-        return res;
+        collect(cur, pre.substr(0, pre.size() - 1), res); return res;
     }
-    void clear() { root = make_unique<TrieNode>(); }
 };
 
-// ===================== 核心数据结构 =====================
+// ===================== 数据结构 =====================
 struct Document { int id; string title, content; vector<string> words; };
-struct LinkNode { string data; LinkNode* next; LinkNode(const string& d) : data(d), next(nullptr) {} };
-
-// 全局存储
 vector<Document> docs;
-unordered_map<string, unordered_set<int>> invertIndex; // 用set替代vector，自动去重
+unordered_map<string, vector<int>> invertIndex;
 unordered_map<string, vector<string>> synonymDict;
 Trie globalTrie;
 vector<string> searchHistory;
 const string HISTORY_FILE = "search_history.txt";
 
+struct LinkNode { int data; LinkNode* next; };
+
 // ===================== 工具函数 =====================
 void toLower(string& s) { for (char& c : s) c = tolower((unsigned char)c); }
+bool isSep(char c) { return !isalpha((unsigned char)c); }
 
-vector<string> tokenize(const string& text) {
-    vector<string> words; string temp;
-    for (char c : text) {
-        if (isalpha((unsigned char)c)) temp += tolower((unsigned char)c);
-        else if (!temp.empty()) { words.push_back(temp); temp.clear(); }
-    }
-    if (!temp.empty()) words.push_back(temp);
-    sort(words.begin(), words.end());
-    words.erase(unique(words.begin(), words.end()), words.end());
-    return words;
-}
-
-// 【合并】提取公共的“根据ID获取文档”逻辑，消除原代码中5处重复遍历
-vector<Document> getDocsByIds(const unordered_set<int>& ids) {
-    vector<Document> res;
-    for (int id : ids) 
-        if (id >= 0 && id < (int)docs.size()) res.push_back(docs[id]);
-    return res;
-}
-
-// 【合并】提取公共的“打印搜索结果”逻辑，消除原代码中4处重复输出循环
-void printSearchResults(const vector<Document>& results, const string& keyword = "") {
-    cout << "\n一共找到 " << results.size() << " 条相关结果\n";
-    if (results.empty()) { cout << "未查询到相关内容\n"; return; }
-    for (const auto& d : results) {
-        cout << "\n文档[" << d.id + 1 << "]：" << d.title << "\n内容：" << d.content << "\n";
+// 统一的去重合并函数
+void mergeDocs(vector<Document>& a, const vector<Document>& b) {
+    for (auto& x : b) {
+        if (none_of(a.begin(), a.end(), [&](auto& y){ return y.id == x.id; }))
+            a.push_back(x);
     }
 }
 
-// ===================== 历史记录 & 链表 (完整保留) =====================
-void loadHistory() {
-    ifstream fin(HISTORY_FILE); string line;
-    searchHistory.clear();
-    while (getline(fin, line)) if (!line.empty()) searchHistory.push_back(line);
+// 文本预处理（分词+小写+去重）
+vector<string> preprocess(const string& s) {
+    vector<string> w; string t;
+    for (char c : s) {
+        if (isalpha((unsigned char)c)) t += tolower((unsigned char)c);
+        else if (!t.empty()) { w.push_back(t); t.clear(); }
+    }
+    if (!t.empty()) w.push_back(t);
+    sort(w.begin(), w.end());
+    w.erase(unique(w.begin(), w.end()), w.end());
+    return w;
 }
-void saveHistory() {
-    ofstream fout(HISTORY_FILE);
-    for (const auto& h : searchHistory) fout << h << "\n";
-}
-LinkNode* createList(const vector<string>& vec) {
-    if (vec.empty()) return nullptr;
-    LinkNode *head = new LinkNode(vec[0]), *cur = head;
-    for (size_t i = 1; i < vec.size(); i++) { cur->next = new LinkNode(vec[i]); cur = cur->next; }
-    return head;
-}
-void printList(LinkNode* head) {
-    while (head) { cout << head->data << " -> "; head = head->next; }
-    cout << "NULL\n";
-}
-void freeList(LinkNode* head) { while (head) { LinkNode* t = head; head = head->next; delete t; } }
 
 // ===================== 文档管理 =====================
+void tokenize(Document& d) {
+    d.words.clear();
+    for (int p = 0, len = d.content.size(); p < len; ) {
+        while (p < len && isSep(d.content[p])) p++;
+        if (p >= len) break;
+        int st = p; while (p < len && !isSep(d.content[p])) p++;
+        string w = d.content.substr(st, p - st); toLower(w); d.words.push_back(w);
+    }
+}
+
 void addDoc() {
     Document d; d.id = docs.size();
-    cout << "请输入文档标题："; cin.ignore(); getline(cin, d.title);
-    cout << "请输入文档内容：\n"; getline(cin, d.content);
-    d.words = tokenize(d.title + " " + d.content);
-    docs.push_back(d);
-    // 增量构建索引，无需每次全量重建
-    for (const string& term : d.words) {
-        invertIndex[term].insert(d.id);
-        globalTrie.insert(term);
-    }
-    cout << "文档添加成功，共" << docs.size() << "个文档。\n";
+    cout << "标题："; cin.ignore(); getline(cin, d.title);
+    cout << "内容："; getline(cin, d.content);
+    tokenize(d); docs.push_back(d); cout << "添加成功，共" << docs.size() << "个文档。\n";
 }
 
 void listDocs() {
-    if (docs.empty()) { cout << "当前文档库为空。\n"; return; }
-    cout << "=== 文档列表（共" << docs.size() << "个） ===\n";
-    for (size_t i = 0; i < docs.size(); i++) cout << "[" << i + 1 << "] " << docs[i].title << "\n";
+    if (docs.empty()) { cout << "文档库为空。\n"; return; }
+    cout << "=== 文档列表 ===\n";
+    for (size_t i = 0; i < docs.size(); i++) cout << "[" << i+1 << "] " << docs[i].title << "\n";
 }
 
 void viewDoc() {
-    if (docs.empty()) { cout << "当前无文档可查看。\n"; return; }
-    int idx; cout << "请输入要查看的文档编号：";
-    if (!(cin >> idx) || idx < 1 || idx > (int)docs.size()) { cout << "无效编号。\n"; cin.clear(); cin.ignore(10000,'\n'); return; }
-    cout << "\n=== 文档标题：" << docs[idx-1].title << " ===\n内容：\n" << docs[idx-1].content << "\n";
+    if (docs.empty()) { cout << "无文档。\n"; return; }
+    int idx; cout << "编号："; cin >> idx;
+    if (idx < 1 || idx > (int)docs.size()) { cout << "无效。\n"; cin.clear(); cin.ignore(10000, '\n'); return; }
+    Document& d = docs[idx-1];
+    cout << "\n=== " << d.title << " ===\n内容：" << d.content << "\n分词：";
+    for (auto& w : d.words) cout << w << " "; cout << "\n";
 }
 
 void deleteDoc() {
-    if (docs.empty()) { cout << "当前无文档可删除。\n"; return; }
-    int idx; cout << "请输入要删除的文档编号：";
-    if (!(cin >> idx) || idx < 1 || idx > (int)docs.size()) { cout << "无效编号。\n"; cin.clear(); cin.ignore(10000,'\n'); return; }
+    if (docs.empty()) { cout << "无文档。\n"; return; }
+    int idx; cout << "编号："; cin >> idx;
+    if (idx < 1 || idx > (int)docs.size()) { cout << "无效。\n"; cin.clear(); cin.ignore(10000, '\n'); return; }
     docs.erase(docs.begin() + idx - 1);
-    // 删除后需全量重建索引（因ID变化）
-    invertIndex.clear(); globalTrie.clear();
-    for (auto& d : docs) {
-        d.id = &d - &docs[0]; // 修正ID
-        d.words = tokenize(d.title + " " + d.content);
-        for (const string& t : d.words) { invertIndex[t].insert(d.id); globalTrie.insert(t); }
-    }
-    cout << "删除成功，当前剩余" << docs.size() << "个文档。\n";
+    for (size_t i = 0; i < docs.size(); i++) docs[i].id = i;
+    cout << "删除成功，剩余" << docs.size() << "个。\n";
 }
 
-// ===================== 搜索功能 (全功能保留) =====================
+// ===================== 索引构建 =====================
 void buildIndex() {
     invertIndex.clear(); globalTrie.clear();
     for (auto& d : docs) {
-        d.words = tokenize(d.title + " " + d.content);
-        for (const string& t : d.words) { invertIndex[t].insert(d.id); globalTrie.insert(t); }
+        auto terms = preprocess(d.content + " " + d.title);
+        for (auto& t : terms) { invertIndex[t].push_back(d.id); globalTrie.insert(t); }
     }
-    cout << "全文索引 & Trie 前缀树构建完成\n";
+    cout << "索引构建完成。\n";
 }
 
-// 精准搜索
+// 通用：根据ID列表获取文档
+vector<Document> getDocsByIds(const vector<int>& ids) {
+    vector<Document> res;
+    for (int id : ids) {
+        auto it = find_if(docs.begin(), docs.end(), [&](auto& d){ return d.id == id; });
+        if (it != docs.end()) res.push_back(*it);
+    }
+    return res;
+}
+
+// ===================== 搜索功能 =====================
 vector<Document> exactSearch(string kw) {
     toLower(kw);
     auto it = invertIndex.find(kw);
-    return it == invertIndex.end() ? vector<Document>{} : getDocsByIds(it->second);
+    return (it == invertIndex.end()) ? vector<Document>{} : getDocsByIds(it->second);
 }
 
-// 前缀模糊搜索 (合并原prefixFuzzySearch与triePrefixSearch，保留Trie高效版)
-vector<Document> triePrefixSearch(string prefix) {
-    toLower(prefix);
-    unordered_set<int> ids;
-    for (const string& w : globalTrie.startWith(prefix)) {
-        auto it = invertIndex.find(w);
-        if (it != invertIndex.end()) ids.insert(it->second.begin(), it->second.end());
+vector<Document> prefixFuzzySearch(string pre) {
+    toLower(pre); vector<Document> res;
+    for (auto& [w, ids] : invertIndex)
+        if (w.size() >= pre.size() && w.substr(0, pre.size()) == pre)
+            mergeDocs(res, getDocsByIds(ids));
+    return res;
+}
+
+vector<Document> triePrefixSearch(string pre) {
+    toLower(pre); vector<Document> res;
+    for (auto& w : globalTrie.startWith(pre))
+        if (auto it = invertIndex.find(w); it != invertIndex.end())
+            mergeDocs(res, getDocsByIds(it->second));
+    return res;
+}
+
+vector<Document> synonymSearch(string w) {
+    toLower(w); vector<Document> res;
+    vector<string> list = {w};
+    if (auto it = synonymDict.find(w); it != synonymDict.end())
+        list.insert(list.end(), it->second.begin(), it->second.end());
+    for (auto& s : list) mergeDocs(res, exactSearch(s));
+    sort(res.begin(), res.end(), [](auto& a, auto& b){ return a.id < b.id; });
+    res.erase(unique(res.begin(), res.end(), [](auto& a, auto& b){ return a.id == b.id; }), res.end());
+    return res;
+}
+
+// ===================== 辅助功能 =====================
+string highlight(string text, string key) {
+    toLower(key); size_t p = 0; string low = text; toLower(low);
+    while ((p = low.find(key, p)) != string::npos) {
+        text.insert(p, "\033[31m"); text.insert(p + key.size() + 5, "\033[0m");
+        p += key.size() + 9; low = text; toLower(low);
     }
-    return getDocsByIds(ids);
+    return text;
 }
 
-// 同义词搜索 (完整保留)
-vector<Document> synonymSearch(string kw) {
-    toLower(kw);
-    unordered_set<int> ids;
-    auto synIt = synonymDict.find(kw);
-    if (synIt != synonymDict.end()) {
-        for (const string& syn : synIt->second) {
-            auto it = invertIndex.find(syn);
-            if (it != invertIndex.end()) ids.insert(it->second.begin(), it->second.end());
-        }
+string genAbstract(const string& text, const string& key) {
+    size_t p = text.find(key); if (p == string::npos) p = 0;
+    return "..." + text.substr(max(0, (int)p - 15), min(70, (int)text.size() - (int)p + 15)) + "...";
+}
+
+// ===================== 布尔查询 =====================
+void getWordDocs(const string& w, vector<int>& out) {
+    out.clear(); string l = w; toLower(l);
+    if (auto it = invertIndex.find(l); it != invertIndex.end()) out = it->second;
+}
+
+void queryAnd(const vector<int>& a, const vector<int>& b, vector<int>& res) {
+    res.clear();
+    for (int x : a) if (find(b.begin(), b.end(), x) != b.end()) res.push_back(x);
+}
+void queryOr(const vector<int>& a, const vector<int>& b, vector<int>& res) {
+    res = a;
+    for (int y : b) if (find(a.begin(), a.end(), y) == a.end()) res.push_back(y);
+}
+void queryNot(const vector<int>& t, vector<int>& res) {
+    res.clear();
+    for (int i = 0; i < (int)docs.size(); i++)
+        if (find(t.begin(), t.end(), i) == t.end()) res.push_back(i);
+}
+
+void parseQuery(const string& q) {
+    vector<int> res; vector<string> tok; string t;
+    for (char c : q + " ") {
+        if (c == ' ') { if (!t.empty()) tok.push_back(t); t.clear(); }
+        else t += c;
     }
-    // 同时包含原词结果
-    auto origIt = invertIndex.find(kw);
-    if (origIt != invertIndex.end()) ids.insert(origIt->second.begin(), origIt->second.end());
-    return getDocsByIds(ids);
-}
-
-// 布尔查询解析 (完整保留AND/OR/NOT)
-vector<Document> boolSearch(const string& query) {
-    unordered_set<int> resultIds;
     bool first = true;
-    size_t pos = 0;
-    while (pos < query.size()) {
-        while (pos < query.size() && isspace(query[pos])) pos++;
-        if (pos >= query.size()) break;
-        
-        bool isNot = false;
-        if (query.substr(pos, 3) == "NOT") { isNot = true; pos += 3; while (pos < query.size() && isspace(query[pos])) pos++; }
-        
-        size_t end = pos;
-        while (end < query.size() && !isspace(end) && query.substr(end,3)!="AND" && query.substr(end,2)!="OR") end++;
-        string term = query.substr(pos, end - pos);
-        toLower(term);
-        pos = end;
-        
-        unordered_set<int> termIds;
-        auto it = invertIndex.find(term);
-        if (it != invertIndex.end()) termIds = it->second;
-        
-        if (first) { resultIds = isNot ? unordered_set<int>{} : termIds; first = false; }
-        else if (isNot) { for (int id : termIds) resultIds.erase(id); }
-        else { 
-            // 简单处理：默认OR语义（如需AND可在此调整）
-            resultIds.insert(termIds.begin(), termIds.end()); 
+    for (size_t i = 0; i < tok.size(); i++) {
+        vector<int> b;
+        if (tok[i] == "AND" && i+1 < tok.size()) { getWordDocs(tok[++i], b); queryAnd(res, b, res); }
+        else if (tok[i] == "OR" && i+1 < tok.size()) { getWordDocs(tok[++i], b); queryOr(res, b, res); }
+        else if (tok[i] == "NOT" && i+1 < tok.size()) { getWordDocs(tok[++i], b); queryNot(b, res); }
+        else {
+            getWordDocs(tok[i], b);
+            if (first) { res = b; first = false; }
+            else queryAnd(res, b, res);
         }
-        
-        while (pos < query.size() && isspace(query[pos])) pos++;
-        if (pos < query.size() && query.substr(pos,3)=="AND") { pos += 3; }
-        else if (pos < query.size() && query.substr(pos,2)=="OR") { pos += 2; }
     }
-    return getDocsByIds(resultIds);
+    cout << "\n查询结果：\n";
+    if (res.empty()) cout << "未查询到相关内容\n";
+    else for (int id : res) cout << "[" << id << "] " << docs[id].title << " - " << docs[id].content << "\n";
 }
 
-// ===================== 主菜单 =====================
+// ===================== 历史记录 =====================
+void loadHistory() {
+    ifstream f(HISTORY_FILE); if (!f) return;
+    string l; searchHistory.clear();
+    while (getline(f, l)) if (!l.empty()) searchHistory.push_back(l);
+}
+void saveHistory(const string& k) {
+    searchHistory.push_back(k); ofstream f(HISTORY_FILE, ios::app); if (f) f << k << "\n";
+}
+void showHistory() {
+    cout << "\n===== 搜索历史 =====\n";
+    if (searchHistory.empty()) { cout << "无记录\n"; return; }
+    for (size_t i = 0; i < searchHistory.size(); i++) cout << i+1 << ". " << searchHistory[i] << "\n";
+}
+void clearHistory() { searchHistory.clear(); ofstream f(HISTORY_FILE, ios::trunc); }
+
+// ===================== 链表操作 =====================
+void initList(LinkNode*& L) { L = new LinkNode; L->next = nullptr; }
+void destroyList(LinkNode* L) { while (L->next) { auto p = L->next; L->next = p->next; delete p; } }
+void createList(LinkNode* L) {
+    destroyList(L); int n; cout << "元素个数："; cin >> n;
+    if (n <= 0) { cout << "必须>0\n"; cin.clear(); cin.ignore(10000, '\n'); return; }
+    auto tail = L; cout << "输入" << n << "个整数：";
+    for (int i = 0, v; i < n; i++) { cin >> v; tail = tail->next = new LinkNode{v, nullptr}; }
+    cout << "创建完成\n";
+}
+void linkSearch(LinkNode* L, int t) {
+    int p = 1; for (auto n = L->next; n; n = n->next, p++) if (n->data == t) { cout << "第" << p << "个节点\n"; return; }
+    cout << "不存在\n";
+}
+void printList(LinkNode* L) {
+    if (!L->next) { cout << "空链表\n"; return; }
+    cout << "链表："; for (auto p = L->next; p; p = p->next) cout << p->data << " "; cout << "\n";
+}
+
+// ===================== 初始化与主函数 =====================
+void initData() {
+    docs = {{0,"食堂通知","我在食堂很想你，校园东区食堂味道很好"},
+            {1,"操场翻新","百米终点见，操场的跑道已经翻新完毕"},
+            {2,"图书馆","图书馆是校园自习的最佳地点"},
+            {3,"餐厅介绍","餐厅也叫食堂，是校园就餐的主要场所"},
+            {4,"运动场","运动场也就是操场，傍晚很多同学运动"}};
+    synonymDict = {{"食堂",{"餐厅","饭堂"}},{"操场",{"运动场","田径场"}}};
+}
+
+void showResults(vector<Document>& res, const string& q) {
+    cout << "\n找到 " << res.size() << " 条结果\n";
+    if (res.empty()) { cout << "未查询到相关内容\n"; return; }
+    for (auto& d : res) cout << "\n文档" << d.id << "：" << d.title << "\n" << highlight(genAbstract(d.content, q), q) << "\n";
+}
+
 int main() {
-    loadHistory();
-    int op;
+    initData(); buildIndex(); loadHistory();
+    LinkNode* list = nullptr; initList(list);
+
     while (true) {
-        cout << "\n===== 文本检索系统 =====\n"
-             << "1.添加文档 2.文档列表 3.查看文档 4.删除文档\n"
-             << "5.构建索引 6.精准搜索 7.前缀搜索 8.同义词搜索\n"
-             << "9.布尔查询 10.搜索历史 11.链表演示 0.退出\n请选择：";
-        if (!(cin >> op)) { cin.clear(); cin.ignore(10000,'\n'); continue; }
-        if (op == 0) { saveHistory(); break; }
-        
-        string kw;
-        switch (op) {
-            case 1: addDoc(); break;
-            case 2: listDocs(); break;
-            case 3: viewDoc(); break;
-            case 4: deleteDoc(); break;
-            case 5: buildIndex(); break;
-            case 6: 
-                cout << "关键词："; cin.ignore(); getline(cin, kw);
-                printSearchResults(exactSearch(kw), kw);
-                searchHistory.push_back("精准:" + kw);
-                break;
-            case 7:
-                cout << "前缀："; cin.ignore(); getline(cin, kw);
-                printSearchResults(triePrefixSearch(kw));
-                searchHistory.push_back("前缀:" + kw);
-                break;
-            case 8:
-                cout << "关键词："; cin.ignore(); getline(cin, kw);
-                printSearchResults(synonymSearch(kw));
-                searchHistory.push_back("同义:" + kw);
-                break;
-            case 9:
-                cout << "布尔表达式："; cin.ignore(); getline(cin, kw);
-                printSearchResults(boolSearch(kw));
-                searchHistory.push_back("布尔:" + kw);
-                break;
-            case 10:
-                cout << "=== 搜索历史 ===\n";
-                for (const auto& h : searchHistory) cout << h << "\n";
-                break;
-            case 11: {
-                vector<string> demo = {"apple","banana","cherry"};
-                LinkNode* head = createList(demo);
-                cout << "链表演示："; printList(head); freeList(head);
-                break;
+        cout << "\n===== 综合文本检索与管理系统 =====\n"
+             << "1.文档管理 2.智能搜索 3.搜索历史 4.链表操作 0.退出\n请选择：";
+        int op; if (!(cin >> op)) { cin.clear(); cin.ignore(10000, '\n'); continue; }
+
+        if (op == 0) { destroyList(list); delete list; cout << "退出。\n"; break; }
+
+        if (op == 1) {
+            while (true) {
+                cout << "\n--- 文档管理 ---\n1.添加 2.列出 3.查看 4.删除 0.返回\n请选择：";
+                int s; if (!(cin >> s)) { cin.clear(); cin.ignore(10000, '\n'); continue; }
+                if (s == 0) break;
+                switch (s) { case 1: addDoc(); buildIndex(); break; case 2: listDocs(); break; case 3: viewDoc(); break; case 4: deleteDoc(); buildIndex(); break; }
             }
-            default: cout << "无效选项。\n";
+        }
+        else if (op == 2) {
+            cout << "\n--- 智能搜索 ---\n1.精准 2.前缀模糊 3.同义词 4.布尔查询 5.Trie前缀检索\n请选择：";
+            int m; string q; vector<Document> r;
+            if (!(cin >> m)) { cin.clear(); cin.ignore(10000, '\n'); continue; }
+            cin.ignore(); cout << "关键词："; getline(cin, q); saveHistory(q);
+            if (m == 4) parseQuery(q);
+            else {
+                switch (m) { case 2: r = prefixFuzzySearch(q); break; case 3: r = synonymSearch(q); break; case 5: r = triePrefixSearch(q); break; default: r = exactSearch(q); }
+                showResults(r, q);
+            }
+        }
+        else if (op == 3) {
+            while (true) {
+                cout << "\n--- 历史 ---\n1.查看 2.清空 0.返回\n请选择：";
+                int s; if (!(cin >> s)) { cin.clear(); cin.ignore(10000, '\n'); continue; }
+                if (s == 0) break;
+                if (s == 1) showHistory(); else if (s == 2) clearHistory();
+            }
+        }
+        else if (op == 4) {
+            while (true) {
+                cout << "\n--- 链表 ---\n1.创建 2.查找 3.打印 0.返回\n请选择：";
+                int s; if (!(cin >> s)) { cin.clear(); cin.ignore(10000, '\n'); continue; }
+                if (s == 0) break;
+                if (s == 1) createList(list);
+                else if (s == 2) { cout << "查找："; int t; cin >> t; linkSearch(list, t); }
+                else if (s == 3) printList(list);
+            }
         }
     }
     return 0;
