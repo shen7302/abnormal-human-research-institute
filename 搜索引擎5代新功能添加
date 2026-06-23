@@ -1,143 +1,276 @@
-from collections import defaultdict
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
-# ====================== 1. 网页链接图 + 简易PageRank ======================
-def calc_pagerank(web_graph, damping=0.85, iterations=20):
-    nodes = list(web_graph.keys())
-    node_num = len(nodes)
-    if node_num == 0:
-        return {}
-    rank = {n: 1.0 / node_num for n in nodes}
+#define MAX_NODE 64
+#define MAX_STR_LEN 32
+#define MAX_WORD_NUM 64
 
-    for _ in range(iterations):
-        new_rank = {}
-        for target in nodes:
-            incoming_sum = 0.0
-            for src, out_links in web_graph.items():
-                if target in out_links and len(out_links) > 0:
-                    incoming_sum += rank[src] / len(out_links)
-            # PageRank公式
-            new_rank[target] = (1 - damping) / node_num + damping * incoming_sum
-        rank = new_rank
-    # 按权重降序排序
-    return dict(sorted(rank.items(), key=lambda x: x[1], reverse=True))
+// ====================== 1. PageRank 网页链接图 ======================
+typedef struct {
+    char name[MAX_STR_LEN];
+    char outLinks[MAX_NODE][MAX_STR_LEN];
+    int outCnt;
+} WebNode;
 
-# ====================== 2. 搜索词共现图（查询联想扩展） ======================
-class WordCoGraph:
-    def __init__(self):
-        self.graph = defaultdict(lambda: defaultdict(int))
+WebNode webGraph[MAX_NODE];
+int webNodeCnt = 0;
+double pageRank[MAX_NODE];
 
-    def add_cooccur_pair(self, w1, w2):
-        self.graph[w1][w2] += 1
-        self.graph[w2][w1] += 1
-
-    def get_recommend_words(self, keyword, top_k=3):
-        if keyword not in self.graph:
-            return []
-        items = sorted(self.graph[keyword].items(), key=lambda x: x[1], reverse=True)
-        return [word for word, cnt in items[:top_k]]
-
-# ====================== 3. 点击流行为图谱（排序调优提权） ======================
-class ClickFlowGraph:
-    def __init__(self):
-        self.trans_count = defaultdict(int)
-        self.page_boost = defaultdict(float)
-
-    def add_click_path(self, path_list):
-        for i in range(len(path_list)-1):
-            u = path_list[i]
-            v = path_list[i+1]
-            self.trans_count[(u, v)] += 1
-
-    def compute_boost_score(self, weight_coeff=0.1):
-        self.page_boost.clear()
-        for (u, v), cnt in self.trans_count.items():
-            self.page_boost[v] += cnt * weight_coeff
-
-    def get_boost_score(self, page):
-        return self.page_boost.get(page, 0.0)
-
-# ====================== 4. Trie字典树（有限状态自动机/前缀索引） ======================
-class TrieNode:
-    __slots__ = ("children", "is_end")
-    def __init__(self):
-        self.children = dict()
-        self.is_end = False
-
-class TrieIndex:
-    def __init__(self):
-        self.root = TrieNode()
-
-    def insert_word(self, word):
-        node = self.root
-        for ch in word:
-            if ch not in node.children:
-                node.children[ch] = TrieNode()
-            node = node.children[ch]
-        node.is_end = True
-
-    def _dfs_collect(self, node, prefix, result):
-        if node.is_end:
-            result.append(prefix)
-        for char, child_node in node.children.items():
-            self._dfs_collect(child_node, prefix + char, result)
-
-    def prefix_match(self, prefix):
-        node = self.root
-        for ch in prefix:
-            if ch not in node.children:
-                return []
-            node = node.children[ch]
-        res = []
-        self._dfs_collect(node, prefix, res)
-        return res
-
-# ====================== 搜索引擎总入口 & 演示 ======================
-if __name__ == "__main__":
-    print("===== 简易搜索引擎（图结构全套实现）=====\n")
-
-    # 1. 初始化网页链接图，计算PageRank权重
-    web_link_graph = {
-        "pageA": ["pageB", "pageC"],
-        "pageB": ["pageC"],
-        "pageC": ["pageA"],
-        "pageD": ["pageA", "pageB"]
+int findWebNode(const char *name) {
+    for (int i = 0; i < webNodeCnt; i++) {
+        if (strcmp(webGraph[i].name, name) == 0)
+            return i;
     }
-    pr_result = calc_pagerank(web_link_graph)
-    print("【1. PageRank网页权重排序】")
-    for page, score in pr_result.items():
-        print(f"{page} : {score:.4f}")
-    print("-" * 60)
+    return -1;
+}
 
-    # 2. 词共现图，搜索联想推荐
-    word_graph = WordCoGraph()
-    word_graph.add_cooccur_pair("python", "编程")
-    word_graph.add_cooccur_pair("python", "数据分析")
-    word_graph.add_cooccur_pair("python", "爬虫")
-    word_graph.add_cooccur_pair("编程", "java")
-    word_graph.add_cooccur_pair("编程", "python")
-    word_graph.add_cooccur_pair("数据分析", "pandas")
-    rec_words = word_graph.get_recommend_words("python", top_k=3)
-    print("【2. 搜索词联想推荐 - 输入python】")
-    print("推荐关联词：", rec_words)
-    print("-" * 60)
+void addWebEdge(const char *from, const char *to) {
+    int u = findWebNode(from);
+    if (u == -1) {
+        strcpy(webGraph[webNodeCnt].name, from);
+        webGraph[webNodeCnt].outCnt = 0;
+        u = webNodeCnt++;
+    }
+    strcpy(webGraph[u].outLinks[webGraph[u].outCnt++], to);
 
-    # 3. 点击流行为图谱，页面提权
-    click_graph = ClickFlowGraph()
-    click_graph.add_click_path(["pageA", "pageC", "pageD"])
-    click_graph.add_click_path(["pageA", "pageC", "pageB"])
-    click_graph.add_click_path(["pageB", "pageC", "pageD"])
-    click_graph.compute_boost_score()
-    print("【3. 点击流页面额外提权分数】")
-    for p in web_link_graph.keys():
-        print(f"{p} 加分值：{click_graph.get_boost_score(p):.2f}")
-    print("-" * 60)
+    int v = findWebNode(to);
+    if (v == -1) {
+        strcpy(webGraph[webNodeCnt].name, to);
+        webGraph[webNodeCnt].outCnt = 0;
+        webNodeCnt++;
+    }
+}
 
-    # 4. Trie前缀索引检索
-    trie = TrieIndex()
-    vocab_list = ["python", "pycharm", "pandas", "pygame", "java", "javascript"]
-    for w in vocab_list:
-        trie.insert_word(w)
-    prefix_res = trie.prefix_match("py")
-    print("【4. Trie前缀检索，前缀匹配 py】")
-    print("匹配词汇：", prefix_res)
-    print("\n===== 演示全部完成 =====")
+void calcPageRank(double damping, int iter) {
+    double tmpRank[MAX_NODE];
+    int n = webNodeCnt;
+    for (int i = 0; i < n; i++) pageRank[i] = 1.0 / n;
+
+    for (int step = 0; step < iter; step++) {
+        for (int j = 0; j < n; j++) tmpRank[j] = 0.0;
+        for (int target = 0; target < n; target++) {
+            double sum = 0.0;
+            for (int src = 0; src < n; src++) {
+                for (int e = 0; e < webGraph[src].outCnt; e++) {
+                    if (strcmp(webGraph[src].outLinks[e], webGraph[target].name) == 0) {
+                        sum += pageRank[src] / webGraph[src].outCnt;
+                        break;
+                    }
+                }
+            }
+            tmpRank[target] = (1 - damping) / n + damping * sum;
+        }
+        memcpy(pageRank, tmpRank, sizeof(pageRank));
+    }
+}
+
+// ====================== 2. 词共现图（搜索联想） ======================
+typedef struct {
+    char w1[MAX_STR_LEN], w2[MAX_STR_LEN];
+    int cnt;
+} WordEdge;
+WordEdge wordEdges[MAX_WORD_NUM];
+int wordEdgeCnt = 0;
+
+void addWordCooccur(const char *a, const char *b) {
+    for (int i = 0; i < wordEdgeCnt; i++) {
+        if ((strcmp(wordEdges[i].w1, a)==0 && strcmp(wordEdges[i].w2,b)==0) ||
+            (strcmp(wordEdges[i].w1, b)==0 && strcmp(wordEdges[i].w2,a)==0)) {
+            wordEdges[i].cnt++;
+            return;
+        }
+    }
+    strcpy(wordEdges[wordEdgeCnt].w1, a);
+    strcpy(wordEdges[wordEdgeCnt].w2, b);
+    wordEdges[wordEdgeCnt++].cnt = 1;
+}
+
+void getRecommend(const char *key, char res[][MAX_STR_LEN], int topK, int *retCnt) {
+    int idx[MAX_WORD_NUM], val[MAX_WORD_NUM], total=0;
+    *retCnt = 0;
+    for (int i = 0; i < wordEdgeCnt; i++) {
+        if (strcmp(wordEdges[i].w1, key)==0) {
+            idx[total] = i; val[total++] = wordEdges[i].cnt;
+        } else if (strcmp(wordEdges[i].w2, key)==0) {
+            idx[total] = i; val[total++] = wordEdges[i].cnt;
+        }
+    }
+    // 冒泡降序
+    for (int i=0; i<total; i++){
+        for(int j=i+1;j<total;j++){
+            if(val[j]>val[i]){
+                int t=val[i]; val[i]=val[j]; val[j]=t;
+                t=idx[i]; idx[i]=idx[j]; idx[j]=t;
+            }
+        }
+    }
+    int limit = total < topK ? total : topK;
+    for(int i=0;i<limit;i++){
+        WordEdge e = wordEdges[idx[i]];
+        if(strcmp(e.w1, key)==0) strcpy(res[(*retCnt)++], e.w2);
+        else strcpy(res[(*retCnt)++], e.w1);
+    }
+}
+
+// ====================== 3. 点击流行为图谱 ======================
+typedef struct {
+    char u[MAX_STR_LEN], v[MAX_STR_LEN];
+    int count;
+} ClickEdge;
+ClickEdge clickEdges[MAX_NODE];
+int clickEdgeCnt = 0;
+double clickBoost[MAX_NODE];
+
+int findClickEdge(const char *a, const char *b) {
+    for(int i=0;i<clickEdgeCnt;i++){
+        if(strcmp(clickEdges[i].u,a)==0 && strcmp(clickEdges[i].v,b)==0)
+            return i;
+    }
+    return -1;
+}
+
+void addClickPath(char path[][MAX_STR_LEN], int len) {
+    for(int i=0;i<len-1;i++){
+        char *u = path[i], *v = path[i+1];
+        int pos = findClickEdge(u, v);
+        if(pos != -1){
+            clickEdges[pos].count++;
+        }else{
+            strcpy(clickEdges[clickEdgeCnt].u, u);
+            strcpy(clickEdges[clickEdgeCnt].v, v);
+            clickEdges[clickEdgeCnt++].count = 1;
+        }
+    }
+}
+
+void calcClickBoost(double coeff) {
+    memset(clickBoost, 0, sizeof(clickBoost));
+    for(int e=0;e<clickEdgeCnt;e++){
+        int vid = findWebNode(clickEdges[e].v);
+        if(vid != -1){
+            clickBoost[vid] += clickEdges[e].count * coeff;
+        }
+    }
+}
+
+// ====================== 4. Trie字典树（有向图，前缀索引） ======================
+typedef struct TrieNode {
+    struct TrieNode *next[26];
+    int isEnd;
+} TrieNode;
+
+TrieNode* trieCreate() {
+    TrieNode *p = (TrieNode*)malloc(sizeof(TrieNode));
+    memset(p->next, 0, sizeof(p->next));
+    p->isEnd = 0;
+    return p;
+}
+
+void trieInsert(TrieNode *root, const char *s) {
+    TrieNode *p = root;
+    while(*s){
+        int c = *s - 'a';
+        if(!p->next[c]) p->next[c] = trieCreate();
+        p = p->next[c];
+        s++;
+    }
+    p->isEnd = 1;
+}
+
+void trieDfs(TrieNode *p, char buf[], int pos, char res[][MAX_STR_LEN], int *rcnt) {
+    if(p->isEnd){
+        buf[pos] = '\0';
+        strcpy(res[(*rcnt)++], buf);
+    }
+    for(int i=0;i<26;i++){
+        if(p->next[i]){
+            buf[pos] = 'a'+i;
+            trieDfs(p->next[i], buf, pos+1, res, rcnt);
+        }
+    }
+}
+
+int triePrefixSearch(TrieNode *root, const char *pre, char res[][MAX_STR_LEN]) {
+    TrieNode *p = root;
+    char buf[MAX_STR_LEN];
+    int rcnt = 0;
+    int len = strlen(pre);
+    strcpy(buf, pre);
+    for(int i=0;i<len;i++){
+        int c = pre[i]-'a';
+        if(!p->next[c]) return 0;
+        p = p->next[c];
+    }
+    trieDfs(p, buf, len, res, &rcnt);
+    return rcnt;
+}
+
+void trieFree(TrieNode *root) {
+    if(!root) return;
+    for(int i=0;i<26;i++) trieFree(root->next[i]);
+    free(root);
+}
+
+// ====================== 主函数演示入口 ======================
+int main() {
+    printf("========== C语言简易搜索引擎（四类图结构实现）==========\n\n");
+
+    // 1. PageRank 网页链接图
+    addWebEdge("pageA", "pageB");
+    addWebEdge("pageA", "pageC");
+    addWebEdge("pageB", "pageC");
+    addWebEdge("pageC", "pageA");
+    addWebEdge("pageD", "pageA");
+    addWebEdge("pageD", "pageB");
+    calcPageRank(0.85, 20);
+    printf("【1.PageRank 网页权重】\n");
+    for(int i=0;i<webNodeCnt;i++){
+        printf("%s : %.4f\n", webGraph[i].name, pageRank[i]);
+    }
+    puts("--------------------------------------------------------");
+
+    // 2. 搜索词共现联想
+    addWordCooccur("python", "编程");
+    addWordCooccur("python", "数据分析");
+    addWordCooccur("python", "爬虫");
+    addWordCooccur("编程", "java");
+    addWordCooccur("编程", "python");
+    char recWords[8][MAX_STR_LEN];
+    int recNum;
+    getRecommend("python", recWords, 3, &recNum);
+    printf("【2.搜索词联想（python）】\n推荐：");
+    for(int i=0;i<recNum;i++) printf("%s ", recWords[i]);
+    puts("\n--------------------------------------------------------");
+
+    // 3. 点击流行为提权
+    char path1[][MAX_STR_LEN] = {"pageA","pageC","pageD"};
+    char path2[][MAX_STR_LEN] = {"pageA","pageC","pageB"};
+    char path3[][MAX_STR_LEN] = {"pageB","pageC","pageD"};
+    addClickPath(path1,3);
+    addClickPath(path2,3);
+    addClickPath(path3,3);
+    calcClickBoost(0.1);
+    printf("【3.点击流页面加分】\n");
+    for(int i=0;i<webNodeCnt;i++){
+        printf("%s 加分: %.2f\n", webGraph[i].name, clickBoost[i]);
+    }
+    puts("--------------------------------------------------------");
+
+    // 4. Trie前缀索引检索
+    TrieNode *trie = trieCreate();
+    trieInsert(trie, "python");
+    trieInsert(trie, "pycharm");
+    trieInsert(trie, "pandas");
+    trieInsert(trie, "pygame");
+    trieInsert(trie, "java");
+    trieInsert(trie, "javascript");
+    char trieRes[16][MAX_STR_LEN];
+    int matchCnt = triePrefixSearch(trie, "py", trieRes);
+    printf("【4.Trie前缀匹配 py】\n结果：");
+    for(int i=0;i<matchCnt;i++) printf("%s ", trieRes[i]);
+    puts("\n\n================运行完成================");
+
+    trieFree(trie);
+    return 0;
+}
