@@ -1,0 +1,143 @@
+from collections import defaultdict
+
+# ====================== 1. 网页链接图 + 简易PageRank ======================
+def calc_pagerank(web_graph, damping=0.85, iterations=20):
+    nodes = list(web_graph.keys())
+    node_num = len(nodes)
+    if node_num == 0:
+        return {}
+    rank = {n: 1.0 / node_num for n in nodes}
+
+    for _ in range(iterations):
+        new_rank = {}
+        for target in nodes:
+            incoming_sum = 0.0
+            for src, out_links in web_graph.items():
+                if target in out_links and len(out_links) > 0:
+                    incoming_sum += rank[src] / len(out_links)
+            # PageRank公式
+            new_rank[target] = (1 - damping) / node_num + damping * incoming_sum
+        rank = new_rank
+    # 按权重降序排序
+    return dict(sorted(rank.items(), key=lambda x: x[1], reverse=True))
+
+# ====================== 2. 搜索词共现图（查询联想扩展） ======================
+class WordCoGraph:
+    def __init__(self):
+        self.graph = defaultdict(lambda: defaultdict(int))
+
+    def add_cooccur_pair(self, w1, w2):
+        self.graph[w1][w2] += 1
+        self.graph[w2][w1] += 1
+
+    def get_recommend_words(self, keyword, top_k=3):
+        if keyword not in self.graph:
+            return []
+        items = sorted(self.graph[keyword].items(), key=lambda x: x[1], reverse=True)
+        return [word for word, cnt in items[:top_k]]
+
+# ====================== 3. 点击流行为图谱（排序调优提权） ======================
+class ClickFlowGraph:
+    def __init__(self):
+        self.trans_count = defaultdict(int)
+        self.page_boost = defaultdict(float)
+
+    def add_click_path(self, path_list):
+        for i in range(len(path_list)-1):
+            u = path_list[i]
+            v = path_list[i+1]
+            self.trans_count[(u, v)] += 1
+
+    def compute_boost_score(self, weight_coeff=0.1):
+        self.page_boost.clear()
+        for (u, v), cnt in self.trans_count.items():
+            self.page_boost[v] += cnt * weight_coeff
+
+    def get_boost_score(self, page):
+        return self.page_boost.get(page, 0.0)
+
+# ====================== 4. Trie字典树（有限状态自动机/前缀索引） ======================
+class TrieNode:
+    __slots__ = ("children", "is_end")
+    def __init__(self):
+        self.children = dict()
+        self.is_end = False
+
+class TrieIndex:
+    def __init__(self):
+        self.root = TrieNode()
+
+    def insert_word(self, word):
+        node = self.root
+        for ch in word:
+            if ch not in node.children:
+                node.children[ch] = TrieNode()
+            node = node.children[ch]
+        node.is_end = True
+
+    def _dfs_collect(self, node, prefix, result):
+        if node.is_end:
+            result.append(prefix)
+        for char, child_node in node.children.items():
+            self._dfs_collect(child_node, prefix + char, result)
+
+    def prefix_match(self, prefix):
+        node = self.root
+        for ch in prefix:
+            if ch not in node.children:
+                return []
+            node = node.children[ch]
+        res = []
+        self._dfs_collect(node, prefix, res)
+        return res
+
+# ====================== 搜索引擎总入口 & 演示 ======================
+if __name__ == "__main__":
+    print("===== 简易搜索引擎（图结构全套实现）=====\n")
+
+    # 1. 初始化网页链接图，计算PageRank权重
+    web_link_graph = {
+        "pageA": ["pageB", "pageC"],
+        "pageB": ["pageC"],
+        "pageC": ["pageA"],
+        "pageD": ["pageA", "pageB"]
+    }
+    pr_result = calc_pagerank(web_link_graph)
+    print("【1. PageRank网页权重排序】")
+    for page, score in pr_result.items():
+        print(f"{page} : {score:.4f}")
+    print("-" * 60)
+
+    # 2. 词共现图，搜索联想推荐
+    word_graph = WordCoGraph()
+    word_graph.add_cooccur_pair("python", "编程")
+    word_graph.add_cooccur_pair("python", "数据分析")
+    word_graph.add_cooccur_pair("python", "爬虫")
+    word_graph.add_cooccur_pair("编程", "java")
+    word_graph.add_cooccur_pair("编程", "python")
+    word_graph.add_cooccur_pair("数据分析", "pandas")
+    rec_words = word_graph.get_recommend_words("python", top_k=3)
+    print("【2. 搜索词联想推荐 - 输入python】")
+    print("推荐关联词：", rec_words)
+    print("-" * 60)
+
+    # 3. 点击流行为图谱，页面提权
+    click_graph = ClickFlowGraph()
+    click_graph.add_click_path(["pageA", "pageC", "pageD"])
+    click_graph.add_click_path(["pageA", "pageC", "pageB"])
+    click_graph.add_click_path(["pageB", "pageC", "pageD"])
+    click_graph.compute_boost_score()
+    print("【3. 点击流页面额外提权分数】")
+    for p in web_link_graph.keys():
+        print(f"{p} 加分值：{click_graph.get_boost_score(p):.2f}")
+    print("-" * 60)
+
+    # 4. Trie前缀索引检索
+    trie = TrieIndex()
+    vocab_list = ["python", "pycharm", "pandas", "pygame", "java", "javascript"]
+    for w in vocab_list:
+        trie.insert_word(w)
+    prefix_res = trie.prefix_match("py")
+    print("【4. Trie前缀检索，前缀匹配 py】")
+    print("匹配词汇：", prefix_res)
+    print("\n===== 演示全部完成 =====")
