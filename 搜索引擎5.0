@@ -1,0 +1,453 @@
+#include <iostream>
+#include <vector>
+#include <string>
+#include <unordered_map>
+#include <algorithm>
+#include <cctype>
+#include <fstream>
+#include <cmath>
+#include <sstream>
+#include <regex>
+using namespace std;
+
+// ===================== 常量配置 =====================
+constexpr double DAMPING = 0.85;
+constexpr double PR_EPS = 1e-6;
+constexpr int MAX_PR_ITER = 100;
+
+// ===================== 二叉搜索树版 Trie =====================
+struct TrieNode {
+    char ch; TrieNode *left, *right, *child; bool isEnd;
+    TrieNode(char c) : ch(c), left(nullptr), right(nullptr), child(nullptr), isEnd(false) {}
+};
+
+class Trie {
+    TrieNode* root = nullptr;
+    TrieNode* insertChar(TrieNode*& n, char c) {
+        if (!n) return n = new TrieNode(c);
+        if (c < n->ch) return insertChar(n->left, c);
+        if (c > n->ch) return insertChar(n->right, c);
+        return n;
+    }
+    TrieNode* findChar(TrieNode* n, char c) {
+        if (!n) return nullptr;
+        if (c == n->ch) return n;
+        return findChar(c < n->ch ? n->left : n->right, c);
+    }
+    void destroy(TrieNode* n) {
+        if (!n) return;
+        destroy(n->left); destroy(n->right); destroy(n->child); delete n;
+    }
+    void collect(TrieNode* n, string pre, vector<string>& res) {
+        if (!n) return;
+        string cur = pre + n->ch;
+        if (n->isEnd) res.push_back(cur);
+        collect(n->left, pre, res); collect(n->right, pre, res); collect(n->child, cur, res);
+    }
+public:
+    ~Trie() { destroy(root); }
+    void clear() { destroy(root); root = nullptr; }
+    void insert(const string& word) {
+        TrieNode* cur = root; TrieNode** p = &root;
+        for (char c : word) { cur = insertChar(*p, c); p = &(cur->child); }
+        if (cur) cur->isEnd = true;
+    }
+    vector<string> startWith(const string& pre) {
+        vector<string> res; TrieNode* cur = root;
+        for (size_t i = 0; i < pre.size(); i++) {
+            if (!(cur = findChar(cur, pre[i]))) return res;
+            if (i != pre.size() - 1) cur = cur->child;
+        }
+        collect(cur, pre.substr(0, pre.size() - 1), res); return res;
+    }
+};
+
+// ===================== 核心数据结构 =====================
+struct Document {
+    int id;
+    string title, content;
+    vector<string> words;
+    vector<int> outLinks;   // 🆕 出链：本文档指向的其他文档ID
+    double pagerank = 0.0;  // 🆕 PageRank 权重值
+};
+
+vector<Document> docs;
+unordered_map<string, vector<int>> invertIndex;
+unordered_map<string, vector<string>> synonymDict;
+Trie globalTrie;
+vector<string> searchHistory;
+const string HISTORY_FILE = "search_history.txt";
+struct LinkNode { int data; LinkNode* next; };
+
+// ===================== 工具函数 =====================
+void toLower(string& s) { for (char& c : s) c = tolower((unsigned char)c); }
+bool isSep(char c) { return !isalpha((unsigned char)c); }
+
+void mergeDocs(vector<Document>& a, const vector<Document>& b) {
+    for (auto& x : b) {
+        if (none_of(a.begin(), a.end(), [&](auto& y){ return y.id == x.id; }))
+            a.push_back(x);
+    }
+}
+
+vector<string> preprocess(const string& s) {
+    vector<string> w; string t;
+    for (char c : s) {
+        if (isalpha((unsigned char)c)) t += tolower((unsigned char)c);
+        else if (!t.empty()) { w.push_back(t); t.clear(); }
+    }
+    if (!t.empty()) w.push_back(t);
+    sort(w.begin(), w.end());
+    w.erase(unique(w.begin(), w.end()), w.end());
+    return w;
+}
+
+// ===================== 🆕 PageRank 计算引擎 =====================
+void calculatePageRank() {
+    int n = docs.size();
+    if (n == 0) return;
+
+    // 初始化均匀分布
+    double initVal = 1.0 / n;
+    for (auto& d : docs) d.pagerank = initVal;
+
+    vector<double> newPR(n);
+    for (int iter = 0; iter < MAX_PR_ITER; ++iter) {
+        // 基础随机跳转概率
+        fill(newPR.begin(), newPR.end(), (1.0 - DAMPING) / n);
+
+        // 权重传递
+        for (int j = 0; j < n; ++j) {
+            double contribution = DAMPING * docs[j].pagerank;
+            if (docs[j].outLinks.empty()) {
+                // 悬挂节点：权重均分给所有节点
+                double share = contribution / n;
+                for (int i = 0; i < n; ++i) newPR[i] += share;
+            } else {
+                // 正常节点：按出度均分给邻居
+                double share = contribution / docs[j].outLinks.size();
+                for (int toId : docs[j].outLinks) {
+                    if (toId >= 0 && toId < n) newPR[toId] += share;
+                }
+            }
+        }
+
+        // 收敛检测
+        double diff = 0.0;
+        for (int i = 0; i < n; ++i) {
+            diff += fabs(newPR[i] - docs[i].pagerank);
+            docs[i].pagerank = newPR[i];
+        }
+        if (diff < PR_EPS) break;
+    }
+}
+
+// 🆕 从内容中解析超链接引用 [ref:id] 格式
+void parseOutLinks(Document& d) {
+    d.outLinks.clear();
+    regex linkPattern(R"(\[ref:(\d+)\])");
+    auto begin = sregex_iterator(d.content.begin(), d.content.end(), linkPattern);
+    auto end = sregex_iterator();
+    for (auto it = begin; it != end; ++it) {
+        int targetId = stoi((*it)[1].str());
+        if (targetId != d.id) { // 排除自环
+            d.outLinks.push_back(targetId);
+        }
+    }
+}
+
+// ===================== 文档管理 =====================
+void tokenize(Document& d) {
+    d.words.clear();
+    for (int p = 0, len = d.content.size(); p < len; ) {
+        while (p < len && isSep(d.content[p])) p++;
+        if (p >= len) break;
+        int st = p; while (p < len && !isSep(d.content[p])) p++;
+        string w = d.content.substr(st, p - st); toLower(w); d.words.push_back(w);
+    }
+}
+
+void addDoc() {
+    Document d; d.id = docs.size();
+    cout << "标题："; cin.ignore(); getline(cin, d.title);
+    cout << "内容（可用[ref:id]添加链接）："; getline(cin, d.content);
+    tokenize(d);
+    parseOutLinks(d);  // 🆕 解析链接
+    docs.push_back(d);
+    cout << "添加成功，共" << docs.size() << "个文档。\n";
+}
+
+void listDocs() {
+    if (docs.empty()) { cout << "文档库为空。\n"; return; }
+    cout << "=== 文档列表 ===\n";
+    for (size_t i = 0; i < docs.size(); i++)
+        cout << "[" << i+1 << "] " << docs[i].title
+             << " (PR:" << fixed << setprecision(4) << docs[i].pagerank << ")\n";
+}
+
+void viewDoc() {
+    if (docs.empty()) { cout << "无文档。\n"; return; }
+    int idx; cout << "编号："; cin >> idx;
+    if (idx < 1 || idx > (int)docs.size()) { cout << "无效。\n"; cin.clear(); cin.ignore(10000, '\n'); return; }
+    Document& d = docs[idx-1];
+    cout << "\n=== " << d.title << " ===\n"
+         << "PageRank: " << fixed << setprecision(6) << d.pagerank << "\n"
+         << "出链数: " << d.outLinks.size() << "\n"
+         << "内容：" << d.content << "\n分词：";
+    for (auto& w : d.words) cout << w << " "; cout << "\n";
+}
+
+void deleteDoc() {
+    if (docs.empty()) { cout << "无文档。\n"; return; }
+    int idx; cout << "编号："; cin >> idx;
+    if (idx < 1 || idx > (int)docs.size()) { cout << "无效。\n"; cin.clear(); cin.ignore(10000, '\n'); return; }
+    docs.erase(docs.begin() + idx - 1);
+    for (size_t i = 0; i < docs.size(); i++) docs[i].id = i;
+    cout << "删除成功，剩余" << docs.size() << "个。\n";
+}
+
+// ===================== 索引构建（含PageRank） =====================
+void buildIndex() {
+    invertIndex.clear(); globalTrie.clear();
+    for (auto& d : docs) {
+        auto terms = preprocess(d.content + " " + d.title);
+        for (auto& t : terms) { invertIndex[t].push_back(d.id); globalTrie.insert(t); }
+    }
+    calculatePageRank(); // 🆕 构建索引时同步计算PageRank
+    cout << "索引构建完成（含PageRank权重计算）。\n";
+}
+
+vector<Document> getDocsByIds(const vector<int>& ids) {
+    vector<Document> res;
+    for (int id : ids) {
+        auto it = find_if(docs.begin(), docs.end(), [&](auto& d){ return d.id == id; });
+        if (it != docs.end()) res.push_back(*it);
+    }
+    return res;
+}
+
+// ===================== 搜索功能 =====================
+vector<Document> exactSearch(string kw) {
+    toLower(kw);
+    auto it = invertIndex.find(kw);
+    return (it == invertIndex.end()) ? vector<Document>{} : getDocsByIds(it->second);
+}
+
+vector<Document> prefixFuzzySearch(string pre) {
+    toLower(pre); vector<Document> res;
+    for (auto& [w, ids] : invertIndex)
+        if (w.size() >= pre.size() && w.substr(0, pre.size()) == pre)
+            mergeDocs(res, getDocsByIds(ids));
+    return res;
+}
+
+vector<Document> triePrefixSearch(string pre) {
+    toLower(pre); vector<Document> res;
+    for (auto& w : globalTrie.startWith(pre))
+        if (auto it = invertIndex.find(w); it != invertIndex.end())
+            mergeDocs(res, getDocsByIds(it->second));
+    return res;
+}
+
+vector<Document> synonymSearch(string w) {
+    toLower(w); vector<Document> res;
+    vector<string> list = {w};
+    if (auto it = synonymDict.find(w); it != synonymDict.end())
+        list.insert(list.end(), it->second.begin(), it->second.end());
+    for (auto& s : list) mergeDocs(res, exactSearch(s));
+    sort(res.begin(), res.end(), [](auto& a, auto& b){ return a.id < b.id; });
+    res.erase(unique(res.begin(), res.end(), [](auto& a, auto& b){ return a.id == b.id; }), res.end());
+    return res;
+}
+
+// ===================== 辅助功能 =====================
+string highlight(string text, string key) {
+    toLower(key); size_t p = 0; string low = text; toLower(low);
+    while ((p = low.find(key, p)) != string::npos) {
+        text.insert(p, "\033[31m"); text.insert(p + key.size() + 5, "\033[0m");
+        p += key.size() + 9; low = text; toLower(low);
+    }
+    return text;
+}
+
+string genAbstract(const string& text, const string& key) {
+    size_t p = text.find(key); if (p == string::npos) p = 0;
+    return "..." + text.substr(max(0, (int)p - 15), min(70, (int)text.size() - (int)p + 15)) + "...";
+}
+
+// ===================== 布尔查询 =====================
+void getWordDocs(const string& w, vector<int>& out) {
+    out.clear(); string l = w; toLower(l);
+    if (auto it = invertIndex.find(l); it != invertIndex.end()) out = it->second;
+}
+
+void queryAnd(const vector<int>& a, const vector<int>& b, vector<int>& res) {
+    res.clear();
+    for (int x : a) if (find(b.begin(), b.end(), x) != b.end()) res.push_back(x);
+}
+void queryOr(const vector<int>& a, const vector<int>& b, vector<int>& res) {
+    res = a;
+    for (int y : b) if (find(a.begin(), a.end(), y) == a.end()) res.push_back(y);
+}
+void queryNot(const vector<int>& t, vector<int>& res) {
+    res.clear();
+    for (int i = 0; i < (int)docs.size(); i++)
+        if (find(t.begin(), t.end(), i) == t.end()) res.push_back(i);
+}
+
+void parseQuery(const string& q) {
+    vector<int> res; vector<string> tok; string t;
+    for (char c : q + " ") {
+        if (c == ' ') { if (!t.empty()) tok.push_back(t); t.clear(); }
+        else t += c;
+    }
+    bool first = true;
+    for (size_t i = 0; i < tok.size(); i++) {
+        vector<int> b;
+        if (tok[i] == "AND" && i+1 < tok.size()) { getWordDocs(tok[++i], b); queryAnd(res, b, res); }
+        else if (tok[i] == "OR" && i+1 < tok.size()) { getWordDocs(tok[++i], b); queryOr(res, b, res); }
+        else if (tok[i] == "NOT" && i+1 < tok.size()) { getWordDocs(tok[++i], b); queryNot(b, res); }
+        else {
+            getWordDocs(tok[i], b);
+            if (first) { res = b; first = false; }
+            else queryAnd(res, b, res);
+        }
+    }
+    cout << "\n查询结果：\n";
+    if (res.empty()) cout << "未查询到相关内容\n";
+    else for (int id : res) cout << "[" << id << "] " << docs[id].title << " - " << docs[id].content << "\n";
+}
+
+// ===================== 历史记录 =====================
+void loadHistory() {
+    ifstream f(HISTORY_FILE); if (!f) return;
+    string l; searchHistory.clear();
+    while (getline(f, l)) if (!l.empty()) searchHistory.push_back(l);
+}
+void saveHistory(const string& k) {
+    searchHistory.push_back(k); ofstream f(HISTORY_FILE, ios::app); if (f) f << k << "\n";
+}
+void showHistory() {
+    cout << "\n===== 搜索历史 =====\n";
+    if (searchHistory.empty()) { cout << "无记录\n"; return; }
+    for (size_t i = 0; i < searchHistory.size(); i++) cout << i+1 << ". " << searchHistory[i] << "\n";
+}
+void clearHistory() { searchHistory.clear(); ofstream f(HISTORY_FILE, ios::trunc); }
+
+// ===================== 链表操作 =====================
+void initList(LinkNode*& L) { L = new LinkNode; L->next = nullptr; }
+void destroyList(LinkNode* L) { while (L->next) { auto p = L->next; L->next = p->next; delete p; } }
+void createList(LinkNode* L) {
+    destroyList(L); int n; cout << "元素个数："; cin >> n;
+    if (n <= 0) { cout << "必须>0\n"; cin.clear(); cin.ignore(10000, '\n'); return; }
+    auto tail = L; cout << "输入" << n << "个整数：";
+    for (int i = 0, v; i < n; i++) { cin >> v; tail = tail->next = new LinkNode{v, nullptr}; }
+    cout << "创建完成\n";
+}
+void linkSearch(LinkNode* L, int t) {
+    int p = 1; for (auto n = L->next; n; n = n->next, p++) if (n->data == t) { cout << "第" << p << "个节点\n"; return; }
+    cout << "不存在\n";
+}
+void printList(LinkNode* L) {
+    if (!L->next) { cout << "空链表\n"; return; }
+    cout << "链表："; for (auto p = L->next; p; p = p->next) cout << p->data << " "; cout << "\n";
+}
+
+// ===================== 🆕 搜索结果按PageRank排序展示 =====================
+void showResults(vector<Document>& res, const string& q) {
+    cout << "\n找到 " << res.size() << " 条结果\n";
+    if (res.empty()) { cout << "未查询到相关内容\n"; return; }
+
+    // 🆕 按 PageRank 降序排列，权威文档优先展示
+    sort(res.begin(), res.end(), [](const Document& a, const Document& b) {
+        return a.pagerank > b.pagerank;
+    });
+
+    for (auto& d : res) {
+        cout << "\n文档" << d.id << " [" << fixed << setprecision(4) << d.pagerank << "]："
+             << d.title << "\n"
+             << highlight(genAbstract(d.content, q), q) << "\n";
+    }
+}
+
+// ===================== 初始化数据（含链接关系） =====================
+void initData() {
+    docs = {
+        {0, "食堂通知", "我在食堂很想你，校园东区食堂味道很好 [ref:3]", {}, 0.0},
+        {1, "操场翻新", "百米终点见，操场的跑道已经翻新完毕 [ref:4]", {}, 0.0},
+        {2, "图书馆", "图书馆是校园自习的最佳地点 [ref:0] [ref:1]", {}, 0.0},
+        {3, "餐厅介绍", "餐厅也叫食堂，是校园就餐的主要场所 [ref:0]", {}, 0.0},
+        {4, "运动场", "运动场也就是操场，傍晚很多同学运动 [ref:1] [ref:2]", {}, 0.0}
+    };
+    synonymDict = {{"食堂",{"餐厅","饭堂"}},{"操场",{"运动场","田径场"}}};
+
+    // 🆕 解析所有文档的出链
+    for (auto& d : docs) {
+        tokenize(d);
+        parseOutLinks(d);
+    }
+}
+
+// ===================== 主函数 =====================
+int main() {
+    initData(); buildIndex(); loadHistory();
+    LinkNode* list = nullptr; initList(list);
+
+    while (true) {
+        cout << "\n===== 综合文本检索与PageRank系统 =====\n"
+             << "1.文档管理 2.智能搜索 3.搜索历史 4.链表操作 0.退出\n请选择：";
+        int op; if (!(cin >> op)) { cin.clear(); cin.ignore(10000, '\n'); continue; }
+
+        if (op == 0) { destroyList(list); delete list; cout << "退出。\n"; break; }
+
+        if (op == 1) {
+            while (true) {
+                cout << "\n--- 文档管理 ---\n1.添加 2.列出 3.查看 4.删除 0.返回\n请选择：";
+                int s; if (!(cin >> s)) { cin.clear(); cin.ignore(10000, '\n'); continue; }
+                if (s == 0) break;
+                switch (s) {
+                    case 1: addDoc(); buildIndex(); break;
+                    case 2: listDocs(); break;
+                    case 3: viewDoc(); break;
+                    case 4: deleteDoc(); buildIndex(); break;
+                }
+            }
+        }
+        else if (op == 2) {
+            cout << "\n--- 智能搜索(结果按PageRank排序) ---\n"
+                 << "1.精准 2.前缀模糊 3.同义词 4.布尔查询 5.Trie前缀\n请选择：";
+            int m; string q; vector<Document> r;
+            if (!(cin >> m)) { cin.clear(); cin.ignore(10000, '\n'); continue; }
+            cin.ignore(); cout << "关键词："; getline(cin, q); saveHistory(q);
+            if (m == 4) parseQuery(q);
+            else {
+                switch (m) {
+                    case 2: r = prefixFuzzySearch(q); break;
+                    case 3: r = synonymSearch(q); break;
+                    case 5: r = triePrefixSearch(q); break;
+                    default: r = exactSearch(q);
+                }
+                showResults(r, q);
+            }
+        }
+        else if (op == 3) {
+            while (true) {
+                cout << "\n--- 历史 ---\n1.查看 2.清空 0.返回\n请选择：";
+                int s; if (!(cin >> s)) { cin.clear(); cin.ignore(10000, '\n'); continue; }
+                if (s == 0) break;
+                if (s == 1) showHistory(); else if (s == 2) clearHistory();
+            }
+        }
+        else if (op == 4) {
+            while (true) {
+                cout << "\n--- 链表 ---\n1.创建 2.查找 3.打印 0.返回\n请选择：";
+                int s; if (!(cin >> s)) { cin.clear(); cin.ignore(10000, '\n'); continue; }
+                if (s == 0) break;
+                if (s == 1) createList(list);
+                else if (s == 2) { cout << "查找："; int t; cin >> t; linkSearch(list, t); }
+                else if (s == 3) printList(list);
+            }
+        }
+    }
+    return 0;
+}
